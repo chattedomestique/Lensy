@@ -1,0 +1,17 @@
+{
+  "name": "lensy-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Lensy PWA — a handcrafted Portrait Mode for still photos.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0",
+    "vite-plugin-pwa": "^0.20.0"
+  }
+}

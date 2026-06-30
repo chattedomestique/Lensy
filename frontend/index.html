@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#ec734a" />
+    <link rel="icon" type="image/svg+xml" href="/icons/favicon.svg" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <title>Lensy</title>
+  </head>
+  <body>
+    <main class="app">
+      <header class="masthead">
+        <div class="wordmark">
+          <span class="dot" aria-hidden="true"></span>
+          <span class="display">Lensy</span>
+        </div>
+        <span class="caption">Portrait Mode for still photos · a clean edge is the product</span>
+      </header>
+
+      <div class="layout">
+        <!-- left: stage -->
+        <section class="panel stage">
+          <div id="stage" class="stage-area">
+            <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Add a photo">
+              <div>
+                <svg class="lens-icon" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+                  <circle cx="32" cy="32" r="22" stroke="var(--accent)" stroke-width="3" />
+                  <circle cx="32" cy="32" r="11" stroke="var(--accent-2)" stroke-width="3" />
+                  <circle cx="32" cy="32" r="3.5" fill="var(--accent)" />
+                </svg>
+                <div class="title">Drop a photo, or click to choose</div>
+                <div class="hint">JPEG / PNG / HEIC · stays on your machine</div>
+              </div>
+            </div>
+            <input id="file" type="file" accept="image/*" class="hidden" />
+            <div id="focus-ring" class="focus-ring"></div>
+          </div>
+
+          <div id="progress" class="progress hidden">
+            <div class="track"><div id="progress-fill" class="fill"></div></div>
+            <div class="label">
+              <span id="progress-label" class="caption">Warming up…</span>
+              <span id="progress-pct" class="caption mono">0%</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- right: controls -->
+        <aside class="panel">
+          <div class="controls">
+            <div class="control">
+              <label for="k"><span class="title">Blur</span><span id="k-val" class="val">60</span></label>
+              <input id="k" type="range" min="0" max="100" value="60" />
+              <div class="hint">Aperture strength — how shallow the depth of field.</div>
+            </div>
+
+            <div class="control">
+              <label for="focus"><span class="title">Focal plane</span><span id="focus-val" class="val">0.70</span></label>
+              <input id="focus" type="range" min="0" max="100" value="70" />
+              <div class="hint">Tap the photo to focus there, or drag.</div>
+            </div>
+
+            <div class="control">
+              <label><span class="title">Aperture</span><span id="blades-val" class="val">circular</span></label>
+              <div id="blades" class="seg" role="group" aria-label="Aperture blades">
+                <button data-blades="0" aria-pressed="true">○</button>
+                <button data-blades="5" aria-pressed="false">5</button>
+                <button data-blades="6" aria-pressed="false">6</button>
+                <button data-blades="8" aria-pressed="false">8</button>
+              </div>
+              <div class="hint">Iris blades shape the bokeh.</div>
+            </div>
+
+            <div class="control">
+              <label for="highlight"><span class="title">Highlights</span><span id="highlight-val" class="val">0.60</span></label>
+              <input id="highlight" type="range" min="0" max="150" value="60" />
+              <div class="hint">How much out-of-focus points bloom into bokeh balls.</div>
+            </div>
+
+            <div class="row">
+              <button id="render" class="btn primary" disabled>Render</button>
+              <button id="reset" class="btn ghost" disabled>Reset</button>
+            </div>
+            <button id="download" class="btn ghost hidden">Download</button>
+          </div>
+        </aside>
+      </div>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

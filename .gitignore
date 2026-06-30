@@ -1,0 +1,27 @@
+# --- Python ---
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+backend/models/        # weight cache (downloaded by setup.sh)
+*.egg-info/
+
+# --- Node / frontend ---
+node_modules/
+frontend/dist/
+frontend/dev-dist/
+.vite/
+
+# --- Build / misc ---
+build/
+dist/
+.DS_Store
+*.log
+.env
+.cloudflared/
+*.local
+
+# --- editor ---
+.idea/
+.vscode/

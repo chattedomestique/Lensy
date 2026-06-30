@@ -1,0 +1,47 @@
+[project]
+name = "lensy-backend"
+version = "0.1.0"
+description = "Lensy render backend — edge-safe lens blur for still photos (FastAPI + PyTorch MPS)."
+requires-python = ">=3.11"
+
+# Core deps are always installed by setup.sh. Heavy/optional model deps degrade gracefully
+# (the pipeline detects what's importable at runtime — see backend/app/pipeline/*).
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "python-multipart>=0.0.9",   # multipart file upload
+    "pillow>=10.2",
+    "numpy>=1.26",
+    "opencv-contrib-python>=4.9", # contrib => ximgproc.guidedFilter
+]
+
+[project.optional-dependencies]
+# Installed by setup.sh when present/possible. Failure to install any of these must NOT
+# break a basic render — every pipeline stage has a classic fallback.
+models = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "pymatting>=1.1.12",         # estimate_foreground_ml — the key anti-halo step
+    "transformers>=4.40",        # BiRefNet / Depth Pro hosting
+    "timm>=0.9",
+    "huggingface-hub>=0.23",
+    "scipy>=1.12",
+]
+dev = [
+    "ruff>=0.4",
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # long lines tolerated in this personal tool
