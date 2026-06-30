@@ -6,9 +6,10 @@ import { apiUrl } from "./config";
 
 export interface RenderParams {
   k: number; // 0..100 blur strength
-  disp_focus: number; // 0..1 focal plane
+  disp_focus: number; // 0..1 focal plane (used only when autofocus is false)
+  autofocus: boolean; // lock focus to the subject
   blades: number; // 0 = circular, else N-gon
-  highlight_boost: number; // 0..2
+  highlight_boost: number; // 0..2 bloom strength
   cat_eye: number; // 0..1
 }
 
@@ -72,6 +73,7 @@ export function render(
     form.append("photo", file);
     form.append("k", String(params.k));
     form.append("disp_focus", String(params.disp_focus));
+    form.append("autofocus", String(params.autofocus));
     form.append("blades", String(params.blades));
     form.append("highlight_boost", String(params.highlight_boost));
     form.append("cat_eye", String(params.cat_eye));

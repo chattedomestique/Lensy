@@ -41,6 +41,7 @@ def test_pipeline_runs_with_fallbacks():
 def test_disp_focus_changes_output():
     photo = _synthetic_photo()
     bundle = ModelBundle()
-    a = run_pipeline(photo, RenderParams(k=80, disp_focus=0.2), bundle)
-    b = run_pipeline(photo, RenderParams(k=80, disp_focus=0.9), bundle)
+    # autofocus would override disp_focus, so disable it to test the manual focal plane
+    a = run_pipeline(photo, RenderParams(k=80, disp_focus=0.2, autofocus=False), bundle)
+    b = run_pipeline(photo, RenderParams(k=80, disp_focus=0.9, autofocus=False), bundle)
     assert not np.array_equal(a, b)

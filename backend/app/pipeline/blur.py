@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from .color import linear_to_srgb, reinhard_tonemap, srgb_to_linear
+from .color import linear_to_srgb, srgb_to_linear, tonemap_highlights
 
 
 @dataclass
@@ -32,9 +32,9 @@ class BlurParams:
     disp_focus: float = 0.7    # focal plane in disparity space [0,1] (1 = nearest)
     blades: int = 0            # 0 => circular aperture; >=3 => N-gon bokeh
     rotation: float = 0.0      # aperture rotation, radians
-    highlight_boost: float = 0.6  # extra energy for bright spots (the "balls")
-    cat_eye: float = 0.35      # optical vignetting toward edges (0 = off)
-    n_bins: int = 8            # CoC quantization layers
+    highlight_boost: float = 0.18  # localized bloom strength for true highlights (0 = off)
+    cat_eye: float = 0.2       # optical vignetting toward edges (0 = off)
+    n_bins: int = 10           # CoC quantization layers (smoother gradient)
 
 
 # ---- aperture kernels ---------------------------------------------------------------
@@ -108,22 +108,25 @@ def render_lens_blur(bg_u8: np.ndarray, disparity: np.ndarray, p: BlurParams) ->
 
     bg_lin = srgb_to_linear(bg_u8.astype(np.float32) / 255.0)
 
-    # highlight scatter: boost energy of bright spots so they bloom into bokeh balls
-    lum = bg_lin @ np.array([0.2126, 0.7152, 0.0722], np.float32)
-    hi = np.clip((lum - 0.75) / 0.25, 0.0, 1.0)  # smooth ramp over the top stop
-    boost = (1.0 + p.highlight_boost * 4.0 * hi)[..., None].astype(np.float32)
+    # Bloom source: ONLY the energy above a high threshold (true highlights) glows. Dark and mid
+    # tones contribute nothing, so the blur never lifts blacks or hazes the frame. The excess is
+    # spread with the same depth-of-field as the blur and added back on top (localized, additive)
+    # — not a global multiplicative boost, which is what caused the old wash.
+    HI_THRESH = 0.82
+    excess = np.clip(bg_lin - HI_THRESH, 0.0, None)
+    do_bloom = p.highlight_boost > 0.0
 
     # quantize CoC into bins, composite far→near (largest radius first)
     edges = np.linspace(0.0, max_radius, int(p.n_bins) + 1)
     out_c = np.zeros((h, w, 3), np.float32)  # premultiplied accumulated color
     out_w = np.zeros((h, w, 1), np.float32)
+    bloom = np.zeros((h, w, 3), np.float32)
 
-    # frame-position grids for cat's-eye (sampled at bin centroids — cheap + good enough)
     for i in range(int(p.n_bins), 0, -1):  # far (big radius) → near (small)
         r_lo, r_hi = edges[i - 1], edges[i]
         r_mid = 0.5 * (r_lo + r_hi)
         if r_mid < 0.75:
-            # near-focus layer: effectively sharp, handle in the final pass below
+            # near-focus layer: effectively sharp, handled by the sharp pass below
             continue
         member = ((radius_px >= r_lo) & (radius_px < r_hi)).astype(np.float32)
         if member.sum() < 1.0:
@@ -136,18 +139,24 @@ def render_lens_blur(bg_u8: np.ndarray, disparity: np.ndarray, p: BlurParams) ->
             fy = (ys.mean() / h) * 2 - 1
             kernel = _apply_cat_eye(kernel, float(fx), float(fy), p.cat_eye)
 
-        premult = bg_lin * (member[..., None]) * boost
-        spread_c = cv2.filter2D(premult, -1, kernel, borderType=cv2.BORDER_REPLICATE)
+        m3 = member[..., None]
+        # energy-conserving scatter: color and weight spread together (kernel sums to 1)
+        spread_c = cv2.filter2D(bg_lin * m3, -1, kernel, borderType=cv2.BORDER_REPLICATE)
         spread_w = cv2.filter2D(member, -1, kernel, borderType=cv2.BORDER_REPLICATE)[..., None]
         cov = np.clip(spread_w, 0.0, 1.0)
         out_c = spread_c + out_c * (1.0 - cov)  # premultiplied OVER
         out_w = spread_w + out_w * (1.0 - cov)
+        if do_bloom:
+            bloom += cv2.filter2D(excess * m3, -1, kernel, borderType=cv2.BORDER_REPLICATE)
 
     # sharp (in-focus) pixels: composite the original linear bg under everything
     sharp_w = np.clip(1.0 - out_w, 0.0, 1.0)
     out_c = out_c + bg_lin * sharp_w
     out_w = out_w + sharp_w
-
     result_lin = out_c / np.clip(out_w, 1e-4, None)
-    result_lin = reinhard_tonemap(result_lin)  # roll bloomed highlights back into range
+
+    if do_bloom:  # additive glow, localized to bright out-of-focus areas only
+        result_lin = result_lin + (p.highlight_boost * 2.0) * bloom
+
+    result_lin = tonemap_highlights(result_lin)  # roll only true highlights toward white
     return (np.clip(linear_to_srgb(result_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)

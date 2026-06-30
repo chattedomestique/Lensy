@@ -36,11 +36,12 @@ def to_u8(img_f: np.ndarray) -> np.ndarray:
     return (np.clip(img_f, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
-def reinhard_tonemap(linear_hdr: np.ndarray, white: float = 3.0) -> np.ndarray:
-    """Extended Reinhard: roll HDR linear values that overshot 1.0 (from highlight scatter)
-    back into range while keeping bloom bright. `white` is the luminance that maps to 1.0;
-    values below ~1 are left almost untouched, so only blown-out highlights compress.
-    Applied just before re-encoding to sRGB."""
+def tonemap_highlights(linear_hdr: np.ndarray, knee: float = 0.85) -> np.ndarray:
+    """Roll only the *highlights* back into range. Below `knee` this is the identity (so normal
+    tones keep their contrast — no global wash); above it, values soft-clip toward 1.0 with an
+    exponential knee, so bloom/scatter that pushed pixels past 1.0 fades to white instead of
+    clipping hard. Applied just before re-encoding to sRGB."""
     x = np.clip(linear_hdr, 0.0, None).astype(np.float32)
-    w2 = float(white) * float(white)
-    return np.clip(x * (1.0 + x / w2) / (1.0 + x), 0.0, 1.0).astype(np.float32)
+    span = 1.0 - knee
+    rolled = knee + span * (1.0 - np.exp(-(x - knee) / max(span, 1e-4)))
+    return np.clip(np.where(x < knee, x, rolled), 0.0, 1.0).astype(np.float32)

@@ -28,16 +28,17 @@ def compose(
     fg_lin = srgb_to_linear(np.clip(fg_srgb, 0.0, 1.0))
     bg_lin = srgb_to_linear(blurred_bg_u8.astype(np.float32) / 255.0)
 
-    # --- anti-sticker: mild defocus on subject regions away from the focal plane ---
-    subj_coc = np.abs(disparity.astype(np.float32) - float(p.disp_focus))
-    norm = max(float(p.disp_focus), 1.0 - float(p.disp_focus), 1e-3)
-    subj_blur_amt = float(np.clip(subj_coc.mean() / norm, 0.0, 1.0))
-    if p.k > 0 and subj_blur_amt > 0.04:
-        sigma = 0.6 + 2.5 * subj_blur_amt * (p.k / 100.0)  # gentle, never the full lens blur
-        fg_soft = cv2.GaussianBlur(fg_lin, (0, 0), sigmaX=sigma)
-        # blend toward softened FG proportionally to how off-plane the subject sits
-        mix = np.clip(subj_coc / norm, 0.0, 1.0)[..., None] * 0.6
-        fg_lin = fg_lin * (1.0 - mix) + fg_soft * mix
+    # --- anti-sticker: a *slight*, per-pixel softening only where the subject sits off the focal
+    # plane, so the cutout doesn't read as pasted on. Deliberately gentle — the subject should
+    # stay sharp (the old version averaged defocus over the whole frame, blurring the subject). ---
+    if p.k > 0:
+        subj_coc = np.abs(disparity.astype(np.float32) - float(p.disp_focus))
+        norm = max(float(p.disp_focus), 1.0 - float(p.disp_focus), 1e-3)
+        mix = (np.clip(subj_coc / norm, 0.0, 1.0)[..., None] * 0.3).astype(np.float32)
+        if float(mix.max()) > 0.02:
+            sigma = 0.6 + 1.5 * (p.k / 100.0)
+            fg_soft = cv2.GaussianBlur(fg_lin, (0, 0), sigmaX=sigma)
+            fg_lin = fg_lin * (1.0 - mix) + fg_soft * mix
 
     # --- premultiplied OVER ---
     out_lin = fg_lin * a + bg_lin * (1.0 - a)

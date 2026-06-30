@@ -79,10 +79,11 @@ async def start_render(
     photo: UploadFile = File(...),
     k: float = Form(60.0),
     disp_focus: float = Form(0.7),
+    autofocus: bool = Form(True),
     blades: int = Form(0),
     rotation: float = Form(0.0),
-    highlight_boost: float = Form(0.6),
-    cat_eye: float = Form(0.35),
+    highlight_boost: float = Form(0.18),
+    cat_eye: float = Form(0.2),
     working_res: int = Form(2048),
 ) -> JSONResponse:
     bundle = getattr(request.app.state, "bundle", None)
@@ -102,6 +103,7 @@ async def start_render(
     params = RenderParams(
         k=float(np.clip(k, 0, 100)),
         disp_focus=float(np.clip(disp_focus, 0, 1)),
+        autofocus=bool(autofocus),
         blades=int(blades),
         rotation=float(rotation),
         highlight_boost=float(np.clip(highlight_boost, 0, 2)),

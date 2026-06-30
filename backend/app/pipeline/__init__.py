@@ -36,17 +36,18 @@ Progress = Callable[[str, str, float], None]
 @dataclass
 class RenderParams:
     k: float = 60.0
-    disp_focus: float = 0.7
+    disp_focus: float = 0.7      # focal plane in disparity space; ignored when autofocus is on
+    autofocus: bool = True       # lock focus to the subject (median disparity under the matte)
     blades: int = 0
     rotation: float = 0.0
-    highlight_boost: float = 0.6
-    cat_eye: float = 0.35
-    working_res: int = 2048  # long-edge px the pipeline runs at
+    highlight_boost: float = 0.18
+    cat_eye: float = 0.2
+    working_res: int = 2048      # long-edge px the pipeline runs at
 
-    def blur_params(self) -> BlurParams:
+    def blur_params(self, disp_focus: float | None = None) -> BlurParams:
         return BlurParams(
             k=self.k,
-            disp_focus=self.disp_focus,
+            disp_focus=self.disp_focus if disp_focus is None else disp_focus,
             blades=self.blades,
             rotation=self.rotation,
             highlight_boost=self.highlight_boost,
@@ -109,17 +110,27 @@ def run_pipeline(
     emit(*_STAGES[3], 3 / n)
     disparity = _depth.estimate_disparity(work, bundle)
 
+    # focal plane: lock to the subject (median disparity under the matte) so the person is sharp
+    # and the background falls off correctly — far more accurate than a fixed guess.
+    focus = params.disp_focus
+    if params.autofocus:
+        subj = disparity[alpha > 0.5]
+        if subj.size > 64:
+            focus = float(np.median(subj))
+            log.info("autofocus → disp_focus=%.3f (subject)", focus)
+    blur_p = params.blur_params(disp_focus=focus)
+
     # 5 — remove subject + inpaint the hole → clean background plate
     emit(*_STAGES[4], 4 / n)
     clean_bg = _inpaint.fill_background(work, alpha, bundle)
 
     # 6 — blur the CLEAN background (depth-graded, linear-light scatter)
     emit(*_STAGES[5], 5 / n)
-    blurred_bg = render_lens_blur(clean_bg, disparity, params.blur_params())
+    blurred_bg = render_lens_blur(clean_bg, disparity, blur_p)
 
     # 7 — recomposite the sharp subject, premultiplied alpha
     emit(*_STAGES[6], 6 / n)
-    out = _compose.compose(fg, alpha, blurred_bg, disparity, params.blur_params())
+    out = _compose.compose(fg, alpha, blurred_bg, disparity, blur_p)
 
     emit("done", "Done", 1.0)
     log.info("pipeline done in %.2fs (work res %s)", time.time() - t0, work.shape[:2])
