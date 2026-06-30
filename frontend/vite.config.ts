@@ -2,8 +2,9 @@ import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 // Backend origin for dev. The Vite dev server proxies /render + /healthz to FastAPI so the
-// PWA talks to a same-origin path during local development.
-const BACKEND = process.env.LENSY_BACKEND ?? "http://localhost:8000";
+// PWA talks to a same-origin path during local development. Port matches scripts (LENSY_PORT,
+// default 8842 — chosen to avoid the rest of the sunhouse.media stack).
+const BACKEND = process.env.LENSY_BACKEND ?? `http://localhost:${process.env.LENSY_PORT ?? "8842"}`;
 
 // Base public path. GitHub Pages serves a project site under /<repo>/, so the Pages build
 // sets LENSY_BASE=/Lensy/. Local dev and root-domain hosts use "/".

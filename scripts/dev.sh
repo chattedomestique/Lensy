@@ -25,9 +25,10 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 # --- backend: uvicorn --reload ----------------------------------------------
-echo "${BOLD}▸ backend${OFF}  http://localhost:8000   (docs: /docs)"
+PORT="${LENSY_PORT:-8842}"
+echo "${BOLD}▸ backend${OFF}  http://localhost:${PORT}   (docs: /docs)"
 ( cd "$ROOT/backend" && source .venv/bin/activate \
-    && exec uvicorn app.main:app --reload --port 8000 ) &
+    && exec uvicorn app.main:app --reload --port "$PORT" ) &
 pids+=("$!")
 
 # --- frontend: vite ----------------------------------------------------------
@@ -38,8 +39,8 @@ pids+=("$!")
 # --- optional: cloudflared quick tunnel -------------------------------------
 if [ "$WANT_TUNNEL" = "1" ]; then
   if command -v cloudflared >/dev/null; then
-    echo "${BOLD}▸ tunnel${OFF}   cloudflared → backend :8000"
-    ( exec cloudflared tunnel --url http://localhost:8000 ) &
+    echo "${BOLD}▸ tunnel${OFF}   cloudflared → backend :${PORT}"
+    ( exec cloudflared tunnel --url "http://localhost:${PORT}" ) &
     pids+=("$!")
   else
     echo "  ! cloudflared not installed — skipping tunnel (brew install cloudflared)"

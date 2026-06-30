@@ -23,14 +23,15 @@
       </header>
 
       <div id="server-panel" class="server-panel hidden" role="dialog" aria-label="Render server">
-        <div class="title">Connect to your render server</div>
+        <div class="title">Render server</div>
         <p class="hint">
-          Rendering runs on your Mac. Start it with <span class="mono">./scripts/serve.sh</span>,
-          then paste the Cloudflare Tunnel URL it prints here.
+          Rendering runs on your Mac (<span class="mono">./scripts/serve.sh</span>), reached over
+          your Cloudflare Tunnel. This defaults to your server — change it only to point somewhere
+          else (e.g. a throwaway <span class="mono">trycloudflare.com</span> URL).
         </p>
         <div class="server-row">
           <input id="server-url" type="url" inputmode="url" autocomplete="off"
-                 placeholder="https://something.trycloudflare.com" />
+                 placeholder="https://lensy.sunhouse.media" />
           <button id="server-test" class="btn primary">Connect</button>
         </div>
         <div id="server-status" class="caption"></div>

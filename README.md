@@ -55,24 +55,33 @@ So a first render works immediately; quality climbs as `setup.sh` finishes cachi
 ## Use it as a hosted app
 
 The PWA is published to **GitHub Pages** at **https://chattedomestique.github.io/Lensy/** (a
-GitHub Actions workflow builds `frontend/` and deploys on every push). Rendering still runs on
-your Mac, so the hosted page reaches your backend over a **Cloudflare Tunnel**:
+GitHub Actions workflow builds `frontend/` and deploys on every push). Rendering runs on your
+Mac, reached over a **Cloudflare named tunnel** at **https://lensy.sunhouse.media** — the hosted
+app defaults to that URL, so it just connects.
 
+**Server (your Mac), port `8842`:**
 ```bash
-brew install cloudflared      # one time
-./scripts/serve.sh            # runs the backend + opens a tunnel, prints a public HTTPS URL
+./scripts/serve.sh            # runs the render backend on :8842 (production)
 ```
 
-Then open the app, click the **Server** pill (top-right) → **Connect to your render server**,
-paste the `https://….trycloudflare.com` URL it printed, and hit **Connect**. The pill turns
-green and you can upload → render → download from anywhere. Install it (browser “Add to Home
-Screen / Install”) to get a standalone app icon.
+**Tunnel (named, you manage cloudflared like your other tunnels)** — ingress in `config.yml`:
+```yaml
+ingress:
+  - hostname: lensy.sunhouse.media
+    service: http://localhost:8842
+  - service: http_status:404
+```
+```bash
+cloudflared tunnel route dns <tunnel-name> lensy.sunhouse.media
+```
 
-> Quick-tunnel URLs change each run, so you re-paste after restarting `serve.sh`. For a URL that
-> never changes, set up a Cloudflare **named tunnel** with your own domain and point the app at
-> that once. The in-app setting is saved in `localStorage`, so it sticks between visits.
+Then open the app — the **Server** pill (top-right) goes green and you can upload → render →
+download from anywhere. Install it (browser “Add to Home Screen / Install”) for a standalone icon.
 
-Local-only? Skip all of the above and just run `./scripts/dev.sh` → http://localhost:5173.
+> The port is `LENSY_PORT` (default **8842**), used by the backend, `dev.sh`, and `serve.sh`.
+> No named tunnel handy? `./scripts/serve.sh --quick` opens a throwaway `trycloudflare.com` URL —
+> paste it into the Server pill (it's saved in `localStorage`). Local-only? `./scripts/dev.sh` →
+> http://localhost:5173.
 
 ## The one inviolable rule (§7.1)
 

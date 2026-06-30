@@ -40,6 +40,9 @@ jobs:
         working-directory: frontend
         env:
           LENSY_BASE: /Lensy/
+          # the hosted PWA defaults to your named Cloudflare Tunnel, so it auto-connects.
+          # (the in-app "Connect" panel can still override this.)
+          VITE_LENSY_API: https://lensy.sunhouse.media
         run: npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
