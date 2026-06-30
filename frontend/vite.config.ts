@@ -2,10 +2,15 @@ import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 // Backend origin for dev. The Vite dev server proxies /render + /healthz to FastAPI so the
-// PWA talks to a same-origin path in both dev and production (behind the Cloudflare Tunnel).
+// PWA talks to a same-origin path during local development.
 const BACKEND = process.env.LENSY_BACKEND ?? "http://localhost:8000";
 
+// Base public path. GitHub Pages serves a project site under /<repo>/, so the Pages build
+// sets LENSY_BASE=/Lensy/. Local dev and root-domain hosts use "/".
+const BASE = process.env.LENSY_BASE ?? "/";
+
 export default defineConfig({
+  base: BASE,
   server: {
     port: 5173,
     proxy: {
@@ -29,7 +34,9 @@ export default defineConfig({
         theme_color: "#ec734a",
         background_color: "#f6f4ef",
         display: "standalone",
-        start_url: "/",
+        scope: BASE,
+        start_url: BASE,
+        id: BASE,
         icons: [
           { src: "icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
           { src: "icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },

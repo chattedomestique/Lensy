@@ -88,6 +88,45 @@ body {
 }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
+/* --- server connect pill + panel --- */
+.server-pill {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: var(--s2);
+  font: inherit; font-size: 12px; color: var(--text);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 999px; padding: 5px 12px; cursor: pointer;
+  transition: background var(--t) var(--spring), transform var(--t) var(--spring);
+}
+.server-pill:hover { background: var(--surface-2); transform: translateY(-1px); }
+.server-pill:focus-visible { outline: none; box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent-2) 35%, transparent); }
+.server-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--subtle); box-shadow: 0 0 0 3px color-mix(in oklab, var(--subtle) 22%, transparent);
+  transition: background var(--t) var(--spring), box-shadow var(--t) var(--spring);
+}
+.server-dot.ok { background: #4caf7d; box-shadow: 0 0 0 3px color-mix(in oklab, #4caf7d 24%, transparent); }
+.server-dot.bad { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 24%, transparent); }
+
+.server-panel {
+  margin: 0 0 var(--s5); padding: var(--s4) var(--s5);
+  background: var(--surface); border: 1px solid var(--line);
+  border-left: 4px solid var(--accent-2); border-radius: var(--r-panel);
+  box-shadow: var(--shadow);
+  animation: panel-in var(--t) var(--spring);
+}
+@keyframes panel-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.server-panel .title { margin-bottom: var(--s2); }
+.server-row { display: flex; gap: var(--s2); margin: var(--s3) 0 var(--s2); }
+.server-row input {
+  flex: 1; font: inherit; font-size: 14px; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--r-input); padding: 10px 12px; outline: none;
+  transition: border-color var(--t) var(--spring), box-shadow var(--t) var(--spring);
+}
+.server-row input:focus-visible { border-color: var(--accent-2); box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent-2) 25%, transparent); }
+#server-status.ok { color: #4caf7d; }
+#server-status.bad { color: var(--accent); }
+
 /* --- layout --- */
 .app {
   max-width: 1100px;

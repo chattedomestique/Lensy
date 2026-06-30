@@ -1,5 +1,8 @@
-// Network layer — talks to the FastAPI backend (same-origin via the Vite proxy / CF Tunnel).
+// Network layer — talks to the FastAPI backend. The base URL is resolved by config.ts:
+// same-origin in dev (Vite proxy), or your Mac's Cloudflare Tunnel URL when hosted.
 // Rendering is a job: POST /render → job_id, then stream stage progress over SSE. No polling.
+
+import { apiUrl } from "./config";
 
 export interface RenderParams {
   k: number; // 0..100 blur strength
@@ -26,7 +29,7 @@ export class ApiError extends Error {}
 
 export async function checkHealth(): Promise<{ ok: boolean; detail: string }> {
   try {
-    const r = await fetch("/healthz");
+    const r = await fetch(apiUrl("/healthz"));
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
       return { ok: false, detail: body?.error?.message ?? `server ${r.status}` };
@@ -35,6 +38,23 @@ export async function checkHealth(): Promise<{ ok: boolean; detail: string }> {
     return { ok: true, detail: body?.models?.device ?? "ready" };
   } catch {
     return { ok: false, detail: "backend unreachable" };
+  }
+}
+
+/** Probe an arbitrary backend base URL (used by the connect panel before saving it). */
+export async function pingHealth(base: string): Promise<{ ok: boolean; detail: string }> {
+  const url = base.trim().replace(/\/+$/, "") + "/healthz";
+  try {
+    const r = await fetch(url, { method: "GET" });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      return { ok: false, detail: body?.error?.message ?? `server ${r.status}` };
+    }
+    const body = await r.json();
+    const m = body?.models;
+    return { ok: true, detail: m ? `ready · ${m.device} · ${m.matte}` : "ready" };
+  } catch {
+    return { ok: false, detail: "unreachable" };
   }
 }
 
@@ -56,7 +76,7 @@ export function render(
     form.append("highlight_boost", String(params.highlight_boost));
     form.append("cat_eye", String(params.cat_eye));
 
-    const start = await fetch("/render", { method: "POST", body: form });
+    const start = await fetch(apiUrl("/render"), { method: "POST", body: form });
     if (!start.ok) {
       const body = await start.json().catch(() => ({}));
       throw new ApiError(body?.error?.message ?? `could not start render (${start.status})`);
@@ -64,7 +84,7 @@ export function render(
     const { job_id } = (await start.json()) as { job_id: string };
 
     const resultUrl = await new Promise<string>((resolve, reject) => {
-      source = new EventSource(`/render/${job_id}/events`);
+      source = new EventSource(apiUrl(`/render/${job_id}/events`));
       source.addEventListener("progress", (e) => {
         if (cancelled) return;
         try {
@@ -102,7 +122,8 @@ export function render(
     if (cancelled) throw new ApiError("cancelled");
 
     // fetch the finished image as a blob → object URL the <img> can show
-    const img = await fetch(resultUrl);
+    // (result_url from the server is a path like /render/<id>/result → prefix the base)
+    const img = await fetch(apiUrl(resultUrl));
     if (!img.ok) {
       const body = await img.json().catch(() => ({}));
       throw new ApiError(body?.error?.message ?? "could not fetch the result");

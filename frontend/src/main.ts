@@ -3,8 +3,9 @@
 
 import "./styles/main.css";
 import { registerSW } from "virtual:pwa-register";
-import { ApiError, checkHealth, render, type RenderHandle } from "./api";
+import { ApiError, render, type RenderHandle } from "./api";
 import { Controls } from "./controls";
+import { setupServerPanel } from "./server";
 
 registerSW({ immediate: true });
 
@@ -180,7 +181,5 @@ downloadBtn.addEventListener("click", () => {
   a.click();
 });
 
-// --- backend warmth indicator -------------------------------------------------
-checkHealth().then(({ ok, detail }) => {
-  if (!ok) toast(`Backend: ${detail}. Start it with ./scripts/dev.sh`);
-});
+// --- server connect pill (shows backend status; lets you point at your tunnel) ---
+setupServerPanel();

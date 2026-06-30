@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#ec734a" />
-    <link rel="icon" type="image/svg+xml" href="/icons/favicon.svg" />
-    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <link rel="icon" type="image/svg+xml" href="./icons/favicon.svg" />
+    <link rel="apple-touch-icon" href="./icons/icon-192.png" />
     <title>Lensy</title>
   </head>
   <body>
@@ -16,7 +16,25 @@
           <span class="display">Lensy</span>
         </div>
         <span class="caption">Portrait Mode for still photos · a clean edge is the product</span>
+        <button id="server-pill" class="server-pill" aria-haspopup="dialog" aria-expanded="false">
+          <span id="server-dot" class="server-dot"></span>
+          <span id="server-label">Server</span>
+        </button>
       </header>
+
+      <div id="server-panel" class="server-panel hidden" role="dialog" aria-label="Render server">
+        <div class="title">Connect to your render server</div>
+        <p class="hint">
+          Rendering runs on your Mac. Start it with <span class="mono">./scripts/serve.sh</span>,
+          then paste the Cloudflare Tunnel URL it prints here.
+        </p>
+        <div class="server-row">
+          <input id="server-url" type="url" inputmode="url" autocomplete="off"
+                 placeholder="https://something.trycloudflare.com" />
+          <button id="server-test" class="btn primary">Connect</button>
+        </div>
+        <div id="server-status" class="caption"></div>
+      </div>
 
       <div class="layout">
         <!-- left: stage -->

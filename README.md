@@ -52,6 +52,28 @@ So a first render works immediately; quality climbs as `setup.sh` finishes cachi
   upscaled — invisible in the result, and the difference between a ~15 s and a ~4 s render.
 - **End-to-end: ~7–8 s** for a 1000×1500 photo on an M4 (BiRefNet ~2 s, LaMa ~4 s, rest <1 s).
 
+## Use it as a hosted app
+
+The PWA is published to **GitHub Pages** at **https://chattedomestique.github.io/Lensy/** (a
+GitHub Actions workflow builds `frontend/` and deploys on every push). Rendering still runs on
+your Mac, so the hosted page reaches your backend over a **Cloudflare Tunnel**:
+
+```bash
+brew install cloudflared      # one time
+./scripts/serve.sh            # runs the backend + opens a tunnel, prints a public HTTPS URL
+```
+
+Then open the app, click the **Server** pill (top-right) → **Connect to your render server**,
+paste the `https://….trycloudflare.com` URL it printed, and hit **Connect**. The pill turns
+green and you can upload → render → download from anywhere. Install it (browser “Add to Home
+Screen / Install”) to get a standalone app icon.
+
+> Quick-tunnel URLs change each run, so you re-paste after restarting `serve.sh`. For a URL that
+> never changes, set up a Cloudflare **named tunnel** with your own domain and point the app at
+> that once. The in-app setting is saved in `localStorage`, so it sticks between visits.
+
+Local-only? Skip all of the above and just run `./scripts/dev.sh` → http://localhost:5173.
+
 ## The one inviolable rule (§7.1)
 
 > matte → **decontaminate** foreground color → remove + inpaint the subject's hole → blur the *clean*
