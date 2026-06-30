@@ -54,10 +54,13 @@ So a first render works immediately; quality climbs as `setup.sh` finishes cachi
 
 ## Use it as a hosted app
 
-The PWA is published to **GitHub Pages** at **https://chattedomestique.github.io/Lensy/** (a
-GitHub Actions workflow builds `frontend/` and deploys on every push). Rendering runs on your
-Mac, reached over a **Cloudflare named tunnel** at **https://lensy.sunhouse.media** — the hosted
-app defaults to that URL, so it just connects.
+**The whole app lives at one URL: https://lensy.sunhouse.media** — the FastAPI backend serves
+the built PWA *and* the render API from the same origin (no CORS, no separate front-end host, no
+"connect to server" step). That origin is your Mac, reached over a **Cloudflare named tunnel**.
+
+> A copy of the static front-end is also published to GitHub Pages
+> (**https://chattedomestique.github.io/Lensy/**) by the deploy workflow; it points back at
+> `lensy.sunhouse.media` for rendering. The single-origin URL above is the primary one.
 
 **Server (your Mac), port `8842`:**
 ```bash

@@ -25,6 +25,15 @@ WANT_QUICK=0
 if [ ! -d "$ROOT/backend/.venv" ]; then
   echo "No backend venv — run ./scripts/setup.sh first."; exit 1
 fi
+
+# build the front-end so the backend can serve the app at its own origin (lensy.sunhouse.media).
+# only builds if missing — run scripts/build.sh to force a refresh after UI changes.
+if [ ! -f "$ROOT/frontend/dist/index.html" ]; then
+  echo "${BOLD}▸ building front-end${OFF} (first run)…"
+  ( cd "$ROOT/frontend" && npm run build >/dev/null 2>&1 ) \
+    && echo "  front-end built → frontend/dist" \
+    || echo "  ! front-end build failed — backend will still serve the API"
+fi
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Port $PORT is already in use. Set LENSY_PORT to a free port and update your tunnel ingress."; exit 1
 fi
@@ -49,9 +58,8 @@ for _ in $(seq 1 60); do
 done
 
 echo
-echo "${BOLD}Lensy backend is live on :${PORT}.${OFF}"
-echo "  ${BOLD}${ORANGE}https://lensy.sunhouse.media${OFF}  ${DIM}(via your named tunnel → localhost:${PORT})${OFF}"
-echo "  ${DIM}App:  https://chattedomestique.github.io/Lensy/  — auto-connects to that URL${OFF}"
+echo "${BOLD}Lensy is live on :${PORT}.${OFF}"
+echo "  ${BOLD}${ORANGE}https://lensy.sunhouse.media${OFF}  ${DIM}— the app (UI + rendering), via your named tunnel → localhost:${PORT}${OFF}"
 
 # --- optional throwaway tunnel (if the named one isn't up yet) ---
 if [ "$WANT_QUICK" = "1" ]; then
