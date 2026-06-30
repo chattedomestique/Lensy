@@ -64,16 +64,21 @@ app defaults to that URL, so it just connects.
 ./scripts/serve.sh            # runs the render backend on :8842 (production)
 ```
 
-**Tunnel (named, you manage cloudflared like your other tunnels)** — ingress in `config.yml`:
-```yaml
-ingress:
-  - hostname: lensy.sunhouse.media
-    service: http://localhost:8842
-  - service: http_status:404
-```
-```bash
-cloudflared tunnel route dns <tunnel-name> lensy.sunhouse.media
-```
+**Tunnel (named, you manage cloudflared like your other tunnels).** Route
+`lensy.sunhouse.media → http://localhost:8842`:
+
+- *Dashboard / token-managed tunnel* (what `cloudflared tunnel run --token …` uses):
+  Cloudflare **Zero Trust → Networks → Tunnels → your tunnel → Public Hostname → Add** —
+  subdomain `lensy`, domain `sunhouse.media`, service **HTTP** `localhost:8842`. The running
+  tunnel picks it up live; the DNS record is created for you.
+- *Local config tunnel* (`config.yml`):
+  ```yaml
+  ingress:
+    - hostname: lensy.sunhouse.media
+      service: http://localhost:8842
+    - service: http_status:404
+  ```
+  then `cloudflared tunnel route dns <tunnel-name> lensy.sunhouse.media`.
 
 Then open the app — the **Server** pill (top-right) goes green and you can upload → render →
 download from anywhere. Install it (browser “Add to Home Screen / Install”) for a standalone icon.
