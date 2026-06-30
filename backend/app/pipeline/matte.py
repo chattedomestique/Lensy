@@ -4,6 +4,7 @@ model isn't loaded. **Always a soft alpha in [0,1], never a hard mask** (§7.2.1
 from __future__ import annotations
 
 import logging
+import os
 
 import cv2
 import numpy as np
@@ -12,7 +13,9 @@ from .runtime import ModelBundle
 
 log = logging.getLogger("lensy.matte")
 
-_BIREFNET_SIZE = 1024  # BiRefNet trained square input
+# Square input the matte model runs at. HR-matting is trained at 2048; 1536 keeps most of the
+# fine-hair recall while staying ~4s on an M4 (2048 is ~3× slower for little gain). Tunable.
+_BIREFNET_SIZE = int(os.environ.get("LENSY_MATTE_SIZE", "1536"))
 
 
 def estimate_alpha(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
@@ -42,6 +45,13 @@ def _birefnet_alpha(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
         pred = pred.sigmoid().cpu()
         pred = F.interpolate(pred, size=(h, w), mode="bilinear", align_corners=False)
     alpha = pred[0, 0].numpy().astype(np.float32)
+    # release MPS scratch buffers — without this the large HR matte's allocations accumulate
+    # and each successive render gets slower (same failure mode that sank Depth Pro).
+    if bundle.device == "mps":
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
     return np.clip(alpha, 0.0, 1.0)
 
 

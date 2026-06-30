@@ -98,14 +98,21 @@ def load_bundle() -> ModelBundle:
 # ---- loaders (kept thin; each raises on any failure so load_bundle() can fall back) ----
 
 
+# Matte model. Default to BiRefNet's dedicated **matting** variant (true soft alpha for hair),
+# not the general segmentation checkpoint — the matting/HR-matting weights are what protect the
+# edge gate (§7.2.1). Override with LENSY_MATTE_MODEL:
+#   ZhengPeng7/BiRefNet_HR-matting  — 2048px, best edges (default)
+#   ZhengPeng7/BiRefNet-matting     — 1024px matting, lighter
+#   ZhengPeng7/BiRefNet-portrait    — tuned for people
+_MATTE_MODEL_ID = os.environ.get("LENSY_MATTE_MODEL", "ZhengPeng7/BiRefNet_HR-matting")
+
+
 def _load_birefnet(device: str):
-    """BiRefNet HR matting via transformers AutoModel (trust_remote_code)."""
+    """BiRefNet matting variant via transformers AutoModel (trust_remote_code)."""
     import torch
     from transformers import AutoModelForImageSegmentation
 
-    model = AutoModelForImageSegmentation.from_pretrained(
-        "ZhengPeng7/BiRefNet", trust_remote_code=True
-    )
+    model = AutoModelForImageSegmentation.from_pretrained(_MATTE_MODEL_ID, trust_remote_code=True)
     # weights ship as half; MPS is happiest in float32 — force it to match our float inputs
     model.to(device).float().eval()
     try:

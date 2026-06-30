@@ -28,10 +28,13 @@ def _try(name: str, fn) -> bool:
 DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Base-hf")
 
 
+MATTE_MODEL_ID = os.environ.get("LENSY_MATTE_MODEL", "ZhengPeng7/BiRefNet_HR-matting")
+
+
 def fetch_birefnet() -> None:
     from transformers import AutoModelForImageSegmentation
 
-    AutoModelForImageSegmentation.from_pretrained("ZhengPeng7/BiRefNet", trust_remote_code=True)
+    AutoModelForImageSegmentation.from_pretrained(MATTE_MODEL_ID, trust_remote_code=True)
 
 
 def fetch_depth() -> None:

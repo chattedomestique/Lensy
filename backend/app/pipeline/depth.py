@@ -52,6 +52,11 @@ def _model_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
     post = processor.post_process_depth_estimation(out, target_sizes=[(h, w)])
     # Depth Anything V2 predicted_depth is disparity-like already (near => large) — use directly
     disp = post[0]["predicted_depth"].detach().cpu().float().numpy().astype(np.float32)
+    if bundle.device == "mps":
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
     if disp.shape != (h, w):
         disp = cv2.resize(disp, (w, h), interpolation=cv2.INTER_LINEAR)
     return _normalize(disp)
