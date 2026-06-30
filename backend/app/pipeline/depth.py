@@ -1,10 +1,14 @@
-"""Stage 4 — Depth. Apple Depth Pro → disparity, chosen for best boundary accuracy + thin
-structure (hair) recall (§7.2.4). Returns **disparity** normalized to [0,1] where larger =
-nearer (so it sits naturally in `CoC = K·(disparity − disp_focus)`).
+"""Stage 4 — Depth. Depth Anything V2 → disparity, normalized to [0,1] where larger = nearer
+(so it sits naturally in `CoC = K·(disparity − disp_focus)`). Depth Anything's `predicted_depth`
+is already disparity-like (near = large), so it is used directly — no inversion.
 
-Fallback when Depth Pro isn't loaded: a smooth synthetic disparity from a vertical gradient
-blended with luminance — crude, but gives a believable "background falls away" focal field
-so the blur stage still has something depth-like to grade against."""
+(The brief's first pick was Apple Depth Pro for boundary/hair-thin recall, but it was 60-130s
+and leaked MPS memory on a 16GB M4; depth here only grades the blur falloff, not the edge, so
+Depth Anything V2 is the practical choice — see runtime._load_depth.)
+
+Fallback when no depth model is loaded: a smooth synthetic disparity from a center-weighted
+radial falloff blended with luminance — crude, but gives a believable "background falls away"
+focal field so the blur stage still has something depth-like to grade against."""
 
 from __future__ import annotations
 
@@ -22,9 +26,9 @@ def estimate_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
     """Return disparity float32 [0,1], shape (H, W). 1 = nearest, 0 = farthest."""
     if bundle.depth_model is not None:
         try:
-            return _depth_pro_disparity(rgb_u8, bundle)
+            return _model_disparity(rgb_u8, bundle)
         except Exception as e:
-            log.warning("Depth Pro failed (%s); using radial fallback", e.__class__.__name__)
+            log.warning("depth model failed (%s); using radial fallback", e.__class__.__name__)
     return _radial_disparity(rgb_u8)
 
 
@@ -36,18 +40,21 @@ def _normalize(d: np.ndarray) -> np.ndarray:
     return np.clip((d - lo) / (hi - lo), 0.0, 1.0)
 
 
-def _depth_pro_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
+def _model_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
     import torch
+    from PIL import Image
 
     h, w = rgb_u8.shape[:2]
-    image = bundle.depth_transform(rgb_u8)
+    processor = bundle.depth_transform
+    inputs = processor(images=Image.fromarray(rgb_u8), return_tensors="pt").to(bundle.device)
     with torch.no_grad():
-        out = bundle.depth_model.infer(image)
-    depth = out["depth"].detach().cpu().numpy().astype(np.float32)  # metric depth, meters
-    if depth.shape != (h, w):
-        depth = cv2.resize(depth, (w, h), interpolation=cv2.INTER_LINEAR)
-    disparity = 1.0 / np.clip(depth, 1e-3, None)  # near => large
-    return _normalize(disparity)
+        out = bundle.depth_model(**inputs)
+    post = processor.post_process_depth_estimation(out, target_sizes=[(h, w)])
+    # Depth Anything V2 predicted_depth is disparity-like already (near => large) — use directly
+    disp = post[0]["predicted_depth"].detach().cpu().float().numpy().astype(np.float32)
+    if disp.shape != (h, w):
+        disp = cv2.resize(disp, (w, h), interpolation=cv2.INTER_LINEAR)
+    return _normalize(disp)
 
 
 def _radial_disparity(rgb_u8: np.ndarray) -> np.ndarray:

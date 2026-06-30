@@ -34,11 +34,23 @@ The pipeline is built so it **runs before every heavy model is present**. Each s
 | Matte          | BiRefNet (HR)              | classic GrabCut / luminance     |
 | Refine         | guided filter (ximgproc)   | bilateral / box                 |
 | Decontaminate  | pymatting `estimate_fg_ml` | premultiplied passthrough       |
-| Depth          | Apple Depth Pro            | radial / luminance disparity    |
+| Depth          | Depth Anything V2          | radial / luminance disparity    |
 | Inpaint        | LaMa (big-lama)            | `cv2.inpaint` (Telea)           |
 | Blur           | linear-light scatter (ours)| —  (always available, MPS-safe) |
 
 So a first render works immediately; quality climbs as `setup.sh` finishes caching weights.
+
+### Implementation notes (deviations from the brief)
+- **Depth: Depth Anything V2, not Apple Depth Pro.** The brief's first pick was Depth Pro,
+  but on a 16 GB M4 it took **60–130 s/render and leaked MPS memory** (degrading each run).
+  Depth Anything V2 runs in **~0.2–1 s**, is stable, and — because depth here only grades the
+  blur *falloff* (the clean edge comes from matte → decontaminate → inpaint) — costs nothing on
+  the edge gate. Override the tier with `LENSY_DEPTH_MODEL`.
+- **LaMa runs on CPU at reduced resolution.** `big-lama.pt` is CUDA-traced (won't load on a
+  CUDA-less Mac) and uses FFT convs that are flaky on MPS, so it runs on CPU. Since the fill is
+  only ever seen *blurred and behind* the sharp subject, it's computed at ≤768 px long edge and
+  upscaled — invisible in the result, and the difference between a ~15 s and a ~4 s render.
+- **End-to-end: ~7–8 s** for a 1000×1500 photo on an M4 (BiRefNet ~2 s, LaMa ~4 s, rest <1 s).
 
 ## The one inviolable rule (§7.1)
 

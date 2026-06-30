@@ -25,29 +25,41 @@ def _try(name: str, fn) -> bool:
         return False
 
 
+DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Base-hf")
+
+
 def fetch_birefnet() -> None:
     from transformers import AutoModelForImageSegmentation
 
     AutoModelForImageSegmentation.from_pretrained("ZhengPeng7/BiRefNet", trust_remote_code=True)
 
 
-def fetch_depth_pro() -> None:
-    import depth_pro  # apple/ml-depth-pro (pip install git+https://github.com/apple/ml-depth-pro)
+def fetch_depth() -> None:
+    # Depth Anything V2 (transformers-native). Apple Depth Pro was dropped — too slow / leaky
+    # on 16GB Apple Silicon; see backend/app/pipeline/runtime.py._load_depth.
+    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
-    depth_pro.create_model_and_transforms()
+    AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
+    AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID)
 
 
 def fetch_lama() -> None:
+    import torch
     from simple_lama_inpainting import SimpleLama
 
-    SimpleLama()
+    orig = torch.jit.load
+    torch.jit.load = lambda f, *a, **k: orig(f, map_location="cpu")  # noqa: ARG005
+    try:
+        SimpleLama(device=torch.device("cpu"))
+    finally:
+        torch.jit.load = orig
 
 
 def main() -> int:
     print("Pre-caching model weights into backend/models/ …")
     results = {
         "BiRefNet (matte)": _try("BiRefNet", fetch_birefnet),
-        "Depth Pro (depth)": _try("Depth Pro", fetch_depth_pro),
+        "Depth Anything V2 (depth)": _try("Depth Anything V2", fetch_depth),
         "LaMa (inpaint)": _try("LaMa", fetch_lama),
     }
     have = sum(results.values())

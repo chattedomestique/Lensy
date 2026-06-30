@@ -4,7 +4,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
-backend/models/        # weight cache (downloaded by setup.sh)
+# weight cache (downloaded by setup.sh) — multi-GB, never commit
+backend/models/
+backend/checkpoints/
 *.egg-info/
 
 # --- Node / frontend ---

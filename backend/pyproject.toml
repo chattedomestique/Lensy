@@ -22,11 +22,14 @@ dependencies = [
 models = [
     "torch>=2.2",
     "torchvision>=0.17",
-    "pymatting>=1.1.12",         # estimate_foreground_ml — the key anti-halo step
-    "transformers>=4.40",        # BiRefNet / Depth Pro hosting
-    "timm>=0.9",
+    "pymatting>=1.1.12",          # estimate_foreground_ml — the key anti-halo step
+    "transformers>=4.45",         # hosts BiRefNet (remote code) + Depth Anything V2
+    "timm>=0.9",                  # BiRefNet backbone
+    "einops>=0.7",                # BiRefNet remote code dep
+    "kornia>=0.7",                # BiRefNet remote code dep
     "huggingface-hub>=0.23",
     "scipy>=1.12",
+    "simple-lama-inpainting>=0.1.2",  # LaMa big-lama inpaint
 ]
 dev = [
     "ruff>=0.4",

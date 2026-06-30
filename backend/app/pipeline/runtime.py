@@ -50,7 +50,7 @@ class ModelBundle:
         return {
             "device": self.device,
             "matte": "birefnet" if self.matte_model else "fallback(grabcut)",
-            "depth": "depth-pro" if self.depth_model else "fallback(radial)",
+            "depth": "depth-anything-v2" if self.depth_model else "fallback(radial)",
             "inpaint": "lama" if self.inpaint_model else "fallback(cv2)",
             "decontaminate": "pymatting" if self.has_pymatting else "fallback(passthrough)",
             "notes": self.notes,
@@ -77,12 +77,12 @@ def load_bundle() -> ModelBundle:
         b.notes.append(f"BiRefNet unavailable ({e.__class__.__name__}); matte = GrabCut fallback")
         log.info("BiRefNet not loaded: %s", e)
 
-    # --- Apple Depth Pro ---
+    # --- Depth (Depth Anything V2) ---
     try:
-        b.depth_model, b.depth_transform = _load_depth_pro(b.device)
+        b.depth_model, b.depth_transform = _load_depth(b.device)
     except Exception as e:
-        b.notes.append(f"Depth Pro unavailable ({e.__class__.__name__}); depth = radial fallback")
-        log.info("Depth Pro not loaded: %s", e)
+        b.notes.append(f"depth model unavailable ({e.__class__.__name__}); depth = radial fallback")
+        log.info("Depth model not loaded: %s", e)
 
     # --- LaMa inpaint (optional; cv2.inpaint is the cheap fallback) ---
     try:
@@ -106,7 +106,8 @@ def _load_birefnet(device: str):
     model = AutoModelForImageSegmentation.from_pretrained(
         "ZhengPeng7/BiRefNet", trust_remote_code=True
     )
-    model.to(device).eval()
+    # weights ship as half; MPS is happiest in float32 — force it to match our float inputs
+    model.to(device).float().eval()
     try:
         torch.set_float32_matmul_precision("high")
     except Exception:
@@ -114,17 +115,37 @@ def _load_birefnet(device: str):
     return model, None  # BiRefNet preprocessing is simple; done inline in matte.py
 
 
-def _load_depth_pro(device: str):
-    """Apple Depth Pro. Uses the `depth_pro` package if installed (from Apple's repo)."""
-    import depth_pro  # apple/ml-depth-pro
+# Depth Anything V2 tier — Base is the accuracy/speed sweet spot on Apple Silicon. Override
+# with LENSY_DEPTH_MODEL (e.g. depth-anything/Depth-Anything-V2-Large-hf for max accuracy).
+# NB: Apple Depth Pro (the brief's first pick) was dropped after benchmarking — on a 16GB M4
+# it took 60-130s/render and leaked MPS memory. Depth Anything V2 runs in ~0.2-1s and is
+# stable; in this pipeline depth only grades the blur falloff (the clean edge comes from
+# matte→decontaminate→inpaint), so boundary accuracy of depth is not the edge gate.
+_DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Base-hf")
 
-    model, transform = depth_pro.create_model_and_transforms(device=device)
-    model.eval()
-    return model, transform
+
+def _load_depth(device: str):
+    """Depth Anything V2 via transformers. Returns (model, image_processor). The model's
+    `predicted_depth` is disparity-like (near = large) — used directly, not inverted."""
+    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+    processor = AutoImageProcessor.from_pretrained(_DEPTH_MODEL_ID)
+    model = AutoModelForDepthEstimation.from_pretrained(_DEPTH_MODEL_ID)
+    model.to(device).float().eval()
+    return model, processor
 
 
 def _load_lama(device: str):
-    """LaMa big-lama via simple-lama-inpainting if available."""
+    """LaMa big-lama via simple-lama-inpainting. The shipped `big-lama.pt` is a CUDA-traced
+    TorchScript module, so it fails to deserialize on a CUDA-less Mac and LaMa's Fourier
+    convolutions are unreliable on MPS — we force a CPU load + CPU inference. Inpaint runs
+    once per render on a masked region, so the CPU latency (~few seconds) is acceptable."""
+    import torch
     from simple_lama_inpainting import SimpleLama
 
-    return SimpleLama(device=device)
+    orig = torch.jit.load
+    torch.jit.load = lambda f, *a, **k: orig(f, map_location="cpu")  # noqa: ARG005
+    try:
+        return SimpleLama(device=torch.device("cpu"))
+    finally:
+        torch.jit.load = orig

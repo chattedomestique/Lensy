@@ -37,6 +37,13 @@ else
   say "Model deps (torch/transformers/pymatting …) — best effort"
   if pip install -q -e ".[models]"; then
     ok "model deps installed"
+    # simple-lama-inpainting pulls in plain opencv-python, which clobbers the contrib build
+    # we need for cv2.ximgproc.guidedFilter (§7.2.2). Normalize to contrib-only.
+    if pip show opencv-python >/dev/null 2>&1; then
+      pip uninstall -y opencv-python opencv-python-headless >/dev/null 2>&1 || true
+      pip install -q --force-reinstall "opencv-contrib-python>=4.9"
+      ok "normalized OpenCV to contrib-only (guidedFilter available)"
+    fi
     say "Pre-caching weights (BiRefNet, Depth Pro, LaMa) — may take a while, never fatal"
     python "$ROOT/scripts/fetch_weights.py" || warn "some weights not cached; fallbacks will be used until they are"
   else

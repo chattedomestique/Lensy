@@ -8,6 +8,7 @@ survives at the silhouette to be smeared back into the blur."""
 from __future__ import annotations
 
 import logging
+import os
 
 import cv2
 import numpy as np
@@ -33,15 +34,32 @@ def fill_background(rgb_u8: np.ndarray, alpha: np.ndarray, bundle: ModelBundle) 
     return _cv2_fill(rgb_u8, hole)
 
 
+# LaMa runs on CPU and scales ~quadratically with resolution. The inpainted plate is only
+# ever seen *blurred* and *behind* the sharp subject, so a reduced-res fill is invisible in
+# the final image — we cap LaMa's working long-edge and upscale the result. Big speedup.
+_LAMA_MAX_EDGE = int(os.environ.get("LENSY_LAMA_MAX_EDGE", "768"))
+
+
 def _lama_fill(rgb_u8: np.ndarray, hole_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
     from PIL import Image
 
-    img = Image.fromarray(rgb_u8)
-    mask = Image.fromarray(hole_u8)
-    out = bundle.inpaint_model(img, mask)  # simple_lama returns a PIL image
+    h, w = rgb_u8.shape[:2]
+    scale = min(1.0, _LAMA_MAX_EDGE / float(max(h, w)))
+    if scale < 1.0:
+        sw, sh = max(1, round(w * scale)), max(1, round(h * scale))
+        small = cv2.resize(rgb_u8, (sw, sh), interpolation=cv2.INTER_AREA)
+        # dilate-then-resize the mask so the downsampled hole never under-covers the subject
+        mask_small = cv2.resize(hole_u8, (sw, sh), interpolation=cv2.INTER_NEAREST)
+    else:
+        small, mask_small = rgb_u8, hole_u8
+
+    out = bundle.inpaint_model(Image.fromarray(small), Image.fromarray(mask_small))
     arr = np.array(out.convert("RGB"))
-    if arr.shape[:2] != rgb_u8.shape[:2]:
-        arr = cv2.resize(arr, (rgb_u8.shape[1], rgb_u8.shape[0]), interpolation=cv2.INTER_LINEAR)
+    if arr.shape[:2] != (h, w):
+        arr = cv2.resize(arr, (w, h), interpolation=cv2.INTER_LINEAR)
+    # keep the original (sharp) pixels outside the hole; only the filled hole comes from LaMa
+    keep = (hole_u8 == 0)
+    arr[keep] = rgb_u8[keep]
     return arr
 
 
