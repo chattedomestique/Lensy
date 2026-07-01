@@ -42,6 +42,9 @@ class BlurParams:
     swirl: float = 0.0         # Petzval swirly bokeh — tangential smear growing toward the edges
     sweet: float = 0.0         # Lensbaby sweet-spot intensity — extra radial blur outside the spot
     sweet_size: float = 0.35   # radius (0..1 of half-diagonal) of the sharp sweet spot
+    halation: float = 0.0      # reddish film glow bleeding out of the highlights
+    halation_size: float = 0.4 # how far the halation glow spreads
+    ca: float = 0.0            # lateral chromatic aberration — colour fringing toward the edges
 
 
 # ---- aperture kernels ---------------------------------------------------------------

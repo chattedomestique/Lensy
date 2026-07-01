@@ -47,6 +47,9 @@ class RenderParams:
     swirl: float = 0.0           # Petzval swirly bokeh
     sweet: float = 0.0           # Lensbaby sweet-spot blur intensity
     sweet_size: float = 0.35     # sharp sweet-spot radius
+    halation: float = 0.0        # film halation glow
+    halation_size: float = 0.4
+    ca: float = 0.0              # lateral chromatic aberration
     working_res: int = 2048      # long-edge px the pipeline runs at
 
     def blur_params(self, disp_focus: float | None = None) -> BlurParams:
@@ -61,6 +64,9 @@ class RenderParams:
             swirl=self.swirl,
             sweet=self.sweet,
             sweet_size=self.sweet_size,
+            halation=self.halation,
+            halation_size=self.halation_size,
+            ca=self.ca,
         )
 
 
@@ -89,9 +95,8 @@ def downscale_to_working(rgb_u8: np.ndarray, working_res: int) -> np.ndarray:
 
 
 def analyze(rgb_u8: np.ndarray, params: RenderParams, bundle: ModelBundle):
-    """Fast first pass for the interactive editor: matte + depth only (no inpaint/blur).
-    Returns (work, alpha, depth_norm) where depth_norm is [0,1], NEAR = 1 (white). Cheap enough
-    (~a few seconds with Depth Anything) to let the user then refine the depth map by hand."""
+    """Fast first pass for the editor: matte + depth only (~a few seconds), so the depth map shows
+    up quickly to edit. Returns (work, alpha, depth_norm); depth_norm is [0,1], NEAR = 1."""
     work = _downscale(rgb_u8, params.working_res)
     alpha = _refine.refine_alpha(work, _matte.estimate_alpha(work, bundle))
     signal = _depth.estimate_disparity(work, bundle)  # near = large (metric metres or [0,1])
@@ -101,17 +106,25 @@ def analyze(rgb_u8: np.ndarray, params: RenderParams, bundle: ModelBundle):
     return work, alpha.astype(np.float32), depth_norm.astype(np.float32)
 
 
+def precompose(work: np.ndarray, alpha: np.ndarray, bundle: ModelBundle):
+    """The slow, depth-independent stages: decontaminate F + inpaint the background. Cached after
+    the first render so every later slider edit reuses them (render_from is then ~2-3s)."""
+    fg = _refine.decontaminate(work, alpha, bundle)
+    clean_bg = _inpaint.fill_background(work, alpha, bundle)
+    return fg, clean_bg
+
+
 def render_from(
     work: np.ndarray,
     alpha: np.ndarray,
-    depth_norm: np.ndarray,      # [0,1], near = 1 — may be the user-edited depth map
+    fg: np.ndarray,              # cached decontaminated foreground F (from analyze)
+    clean_bg: np.ndarray,        # cached inpainted background (from analyze)
+    depth_norm: np.ndarray,      # [0,1], near = 1 — the (edited) depth map
     params: RenderParams,
-    bundle: ModelBundle,
     progress: Progress | None = None,
 ) -> np.ndarray:
-    """Render the final image from a (possibly hand-edited) depth map + matte: decontaminate,
-    inpaint the subject hole, and run the layered occlusion-aware DoF. Depth is treated as
-    normalized [0,1] disparity (near = 1), so the editor's levels/smoothing shape the falloff."""
+    """Fast render from the cached precompose + a (hand-edited) depth map: just the layered
+    occlusion-aware DoF and the lens character. ~2-3s — no matte/depth/decontaminate/inpaint."""
 
     def emit(key: str, label: str, frac: float) -> None:
         if progress:
@@ -124,22 +137,15 @@ def render_from(
     n = len(_STAGES)
     metric = False  # edited depth is normalized disparity, not metric
 
-    emit(*_STAGES[2], 2 / n)
-    fg = _refine.decontaminate(work, alpha, bundle)
-
     emit(*_STAGES[3], 3 / n)
     fg_signal = _depth.smooth_depth(depth_norm)
     bg_signal = _depth.background_depth(depth_norm, (alpha > 0.5).astype(np.uint8))
     if params.autofocus and int((alpha > 0.5).sum()) > 64:
         focus = float(np.median(fg_signal[alpha > 0.5]))
     else:
-        # editor path: the edited depth is already centered on the subject, so use the focal
-        # value directly (it's in the same [0,1] depth space).
+        # editor path: edited depth is already centered on the subject → use disp_focus directly
         focus = float(np.clip(params.disp_focus, 0.0, 1.0))
     blur_p = params.blur_params(disp_focus=focus)
-
-    emit(*_STAGES[4], 4 / n)
-    clean_bg = _inpaint.fill_background(work, alpha, bundle)
 
     emit(*_STAGES[5], 5 / n)
     emit(*_STAGES[6], 6 / n)
@@ -156,9 +162,13 @@ def run_pipeline(
     bundle: ModelBundle,
     progress: Progress | None = None,
 ) -> np.ndarray:
-    """One-shot: analyze then render (automatic depth). Input/return: uint8 RGB (HxWx3)."""
+    """One-shot: analyze → precompose → render (automatic depth). Return: uint8 RGB."""
     work, alpha, depth_norm = analyze(rgb_u8, params, bundle)
-    return render_from(work, alpha, depth_norm, params, bundle, progress)
+    fg, clean_bg = precompose(work, alpha, bundle)
+    return render_from(work, alpha, fg, clean_bg, depth_norm, params, progress)
 
 
-__all__ = ["RenderParams", "run_pipeline", "analyze", "render_from", "downscale_to_working", "ModelBundle"]
+__all__ = [
+    "RenderParams", "run_pipeline", "analyze", "precompose", "render_from",
+    "downscale_to_working", "ModelBundle",
+]

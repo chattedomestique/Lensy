@@ -26,7 +26,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from PIL import Image, ImageOps
 
-from .pipeline import RenderParams, analyze, render_from, run_pipeline
+from .pipeline import RenderParams, analyze, precompose, render_from, run_pipeline
 
 log = logging.getLogger("lensy.api")
 router = APIRouter()
@@ -52,6 +52,8 @@ class Analysis:
     work: np.ndarray       # working-res RGB uint8
     alpha: np.ndarray      # matte [0,1]
     depth: np.ndarray      # depth [0,1], near = 1
+    fg: np.ndarray | None = None        # decontaminated F — computed lazily on the first render
+    clean_bg: np.ndarray | None = None  # inpainted background — the slow step, cached after
     created: float = field(default_factory=time.time)
 
 
@@ -164,7 +166,7 @@ async def analyze_photo_img(aid: str) -> Response:
 
 def _params_from_form(
     k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
-    swirl, sweet, sweet_size, working_res,
+    swirl, sweet, sweet_size, halation, halation_size, ca, working_res,
 ) -> RenderParams:
     return RenderParams(
         k=float(np.clip(k, 0, 100)),
@@ -178,6 +180,9 @@ def _params_from_form(
         swirl=float(np.clip(swirl, 0, 1)),
         sweet=float(np.clip(sweet, 0, 1)),
         sweet_size=float(np.clip(sweet_size, 0.05, 1)),
+        halation=float(np.clip(halation, 0, 1)),
+        halation_size=float(np.clip(halation_size, 0.05, 1)),
+        ca=float(np.clip(ca, 0, 1)),
         working_res=int(np.clip(working_res, 512, 4096)),
     )
 
@@ -230,6 +235,9 @@ async def start_render(
     swirl: float = Form(0.0),
     sweet: float = Form(0.0),
     sweet_size: float = Form(0.35),
+    halation: float = Form(0.0),
+    halation_size: float = Form(0.4),
+    ca: float = Form(0.0),
     working_res: int = Form(2048),
 ) -> JSONResponse:
     bundle = getattr(request.app.state, "bundle", None)
@@ -237,7 +245,7 @@ async def start_render(
         return _friendly(503, "warming", "Models are still loading — try again in a moment.")
     params = _params_from_form(
         k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
-        swirl, sweet, sweet_size, working_res,
+        swirl, sweet, sweet_size, halation, halation_size, ca, working_res,
     )
 
     # Path A — render from a prior analysis + (optionally) a hand-edited depth map
@@ -254,7 +262,13 @@ async def start_render(
                     depth_map = _decode_gray(raw, (w, h))
                 except Exception as e:  # noqa: BLE001
                     return _friendly(400, "bad_depth", f"could not read edited depth: {e}")
-        return _spawn_render(request, render_from, a.work, a.alpha, depth_map, params, bundle)
+
+        def do_render(progress):
+            if a.fg is None:  # lazy precompose on the first render, cached for later edits
+                a.fg, a.clean_bg = precompose(a.work, a.alpha, bundle)
+            return render_from(a.work, a.alpha, a.fg, a.clean_bg, depth_map, params, progress)
+
+        return _spawn_render(request, do_render)
 
     # Path B — one-shot from a photo (automatic depth)
     if photo is None:
