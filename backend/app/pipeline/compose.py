@@ -20,14 +20,14 @@ def compose(
     fg_srgb: np.ndarray,        # F, foreground color float32 [0,1] sRGB (from decontaminate)
     alpha: np.ndarray,          # soft matte float32 [0,1]
     blurred_bg_u8: np.ndarray,  # depth-blurred background plate, sRGB uint8
-    disparity: np.ndarray,
+    radius_fg: np.ndarray,      # subject's per-pixel CoC radius (px)
     p: BlurParams,
 ) -> np.ndarray:
     """Return the final composited image, uint8 RGB."""
     bg_lin = srgb_to_linear(blurred_bg_u8.astype(np.float32) / 255.0)
 
     if p.subject_dof:
-        fg_premult, fg_alpha = blur_foreground_dof(fg_srgb, alpha, disparity, p)
+        fg_premult, fg_alpha = blur_foreground_dof(fg_srgb, alpha, radius_fg, p)
     else:
         fg_lin = srgb_to_linear(np.clip(fg_srgb, 0.0, 1.0))
         fg_alpha = np.clip(alpha, 0.0, 1.0)[..., None].astype(np.float32)

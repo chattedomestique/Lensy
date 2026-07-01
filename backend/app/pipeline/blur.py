@@ -97,22 +97,37 @@ def _apply_cat_eye(kernel: np.ndarray, fx: float, fy: float, strength: float) ->
 # ---- depth → circle-of-confusion, and the shared scatter core -----------------------
 
 _HI_THRESH = 0.82  # linear luminance above which highlights bloom
+_DIOPTER_GAIN = 0.16  # px-per-diopter scaling at K=100 (× diagonal); tunes how fast blur grows
 
 
-def radius_from_disparity(disparity: np.ndarray, p: BlurParams) -> np.ndarray:
-    """Per-pixel blur radius (px) = |signed CoC|. Zero at the focal plane, growing with distance
-    from it in either direction. This is the single depth-of-field field used for BOTH the
-    background and the subject, so the whole scene grades continuously with depth."""
-    h, w = disparity.shape[:2]
+def focal_radius(signal: np.ndarray, focus: float, metric: bool, p: BlurParams) -> np.ndarray:
+    """Per-pixel blur radius (px) — the circle of confusion. This is the physically-correct
+    depth-of-field falloff and the SINGLE field used for both background and subject.
+
+    metric (Depth Pro, meters): CoC ∝ |1/D − 1/D_focus| — the real thin-lens near-field model.
+    Blur grows with the DIOPTER difference from the focal plane, so an object a bit past the
+    subject blurs a little and one far behind blurs a lot — true distance falloff (the floor at
+    your feet ≠ the door 15 ft back). `focus_range` is an in-focus dead zone, in diopters.
+
+    non-metric (Depth Anything, relative): fall back to normalized-disparity distance — no true
+    metres, so the falloff is only approximate."""
+    h, w = signal.shape[:2]
     diag = float(np.hypot(h, w))
-    max_radius = max(1.0, (p.k / 100.0) * diag * 0.045)  # K=100 ≈ 4.5% of diagonal
-    norm = max(float(p.disp_focus), 1.0 - float(p.disp_focus), 1e-3)
-    # in-focus dead zone: everything within focus_range of the focal plane stays perfectly sharp
-    # (a real lens keeps a slab of depth in focus). This is what stops in-focus edges from
-    # spreading a faint rim, while things beyond the zone still grade continuously.
-    coc = np.abs(disparity.astype(np.float32) - float(p.disp_focus))
-    coc = np.clip(coc - float(p.focus_range), 0.0, None) / norm
-    return np.clip(coc, 0.0, 1.0) * max_radius
+    max_radius = max(1.0, (p.k / 100.0) * diag * 0.11)  # ceiling so the far field saturates softly
+
+    if metric:
+        f_dpt = 1.0 / max(float(focus), 0.08)
+        d_dpt = 1.0 / np.clip(signal.astype(np.float32), 0.08, None)
+        diff = np.abs(d_dpt - f_dpt)  # diopters from the focal plane
+        eff = np.clip(diff - float(p.focus_range), 0.0, None)
+        radius = (p.k / 100.0) * diag * _DIOPTER_GAIN * eff
+    else:
+        norm = max(float(focus), 1.0 - float(focus), 1e-3)
+        diff = np.abs(signal.astype(np.float32) - float(focus))
+        eff = np.clip((diff - float(p.focus_range)) / norm, 0.0, 1.0)
+        radius = eff * max_radius
+
+    return np.minimum(radius, max_radius).astype(np.float32)
 
 
 def scatter_dof(
@@ -168,11 +183,10 @@ def scatter_dof(
 # ---- background + foreground renderers ----------------------------------------------
 
 
-def render_lens_blur(bg_u8: np.ndarray, disparity: np.ndarray, p: BlurParams) -> np.ndarray:
-    """Blur the clean (inpainted) background plate by depth. Returns uint8 sRGB."""
+def render_lens_blur(bg_u8: np.ndarray, radius_px: np.ndarray, p: BlurParams) -> np.ndarray:
+    """Blur the clean (inpainted) background plate given a per-pixel CoC radius. Returns uint8 sRGB."""
     h, w = bg_u8.shape[:2]
     bg_lin = srgb_to_linear(bg_u8.astype(np.float32) / 255.0)
-    radius_px = radius_from_disparity(disparity, p)
     excess = np.clip(bg_lin - _HI_THRESH, 0.0, None) if p.highlight_boost > 0 else None
 
     out_c, out_w, bloom = scatter_dof(bg_lin, np.ones((h, w, 1), np.float32), radius_px, p, excess)
@@ -183,14 +197,17 @@ def render_lens_blur(bg_u8: np.ndarray, disparity: np.ndarray, p: BlurParams) ->
     return (np.clip(linear_to_srgb(result_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
-def blur_foreground_dof(
-    fg_srgb: np.ndarray, alpha: np.ndarray, disparity: np.ndarray, p: BlurParams
-):
-    """Apply the SAME depth-of-field to the subject: parts of it off the focal plane blur, the
-    focal parts stay sharp — so the person isn't a flat sticker. Returns (premultiplied linear
-    color, blurred coverage α) for premultiplied compositing over the blurred background."""
+def blur_foreground_dof(fg_srgb: np.ndarray, alpha: np.ndarray, radius_px: np.ndarray, p: BlurParams):
+    """Apply the SAME depth-of-field to the subject given its per-pixel CoC radius: off-focal parts
+    soften, focal parts stay sharp — so the person isn't a flat sticker. Returns (premultiplied
+    linear color, coverage α) for premultiplied compositing.
+
+    The blurred coverage is clamped to the (sharp) matte so the subject softens *internally* but
+    can't spread its edge out over the background — that outward spread is what read as a translucent
+    rim / glow. Result: clean silhouette, depth-softened interior."""
     fg_lin = srgb_to_linear(np.clip(fg_srgb, 0.0, 1.0))
     a = np.clip(alpha, 0.0, 1.0)[..., None].astype(np.float32)
-    radius_px = radius_from_disparity(disparity, p)
     out_c, out_w, _ = scatter_dof(fg_lin, a, radius_px, p, None)
-    return out_c, np.clip(out_w, 0.0, 1.0)
+    cov = np.minimum(out_w, a)                       # never exceed the matte
+    scale = cov / np.clip(out_w, 1e-4, None)         # keep premultiplied color consistent
+    return out_c * scale, cov

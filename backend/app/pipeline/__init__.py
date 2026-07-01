@@ -25,7 +25,7 @@ from . import depth as _depth
 from . import inpaint as _inpaint
 from . import matte as _matte
 from . import refine as _refine
-from .blur import BlurParams, render_lens_blur
+from .blur import BlurParams, focal_radius, render_lens_blur
 from .runtime import ModelBundle
 
 log = logging.getLogger("lensy.pipeline")
@@ -129,39 +129,48 @@ def run_pipeline(
     fg = _refine.decontaminate(work, alpha, bundle)
     dump("02_fg.jpg", (np.clip(fg, 0, 1) * 255).astype(np.uint8))
 
-    # 4 — depth/disparity. Build two smoothed depth fields that DON'T bleed across the silhouette:
-    # one for the subject, one for the background (subject hole filled with background depth). This
-    # is what lets the whole scene grade continuously without a bright ring around the person.
+    # 4 — depth. Keep it in real units (metres for Depth Pro) and build two smoothed fields that
+    # DON'T bleed across the silhouette: one for the subject, one for the background (subject hole
+    # filled with background depth). The blur radius is the true optical CoC from these distances.
     emit(*_STAGES[3], 3 / n)
-    disparity = _depth.estimate_disparity(work, bundle)
-    disp_fg = _depth.smooth_depth(disparity)
-    disp_bg = _depth.background_depth(disparity, (alpha > 0.5).astype(np.uint8))
-    dump("03_disparity.png", disparity, gray=True)
-    dump("03b_disp_bg.png", disp_bg, gray=True)
+    metric = bundle.depth_metric
+    signal = _depth.estimate_disparity(work, bundle)
+    fg_signal = _depth.smooth_depth(signal)
+    bg_signal = _depth.background_depth(signal, (alpha > 0.5).astype(np.uint8))
 
-    # focal plane: lock to the subject (median depth under the matte) so the person is sharp
-    # and everything grades away from there — far more accurate than a fixed guess.
-    focus = params.disp_focus
-    if params.autofocus:
-        subj = disp_fg[alpha > 0.5]
-        if subj.size > 64:
-            focus = float(np.median(subj))
-            log.info("autofocus → disp_focus=%.3f (subject)", focus)
+    # focal distance (in the depth's own units): auto = median depth under the matte.
+    if params.autofocus and int((alpha > 0.5).sum()) > 64:
+        focus = float(np.median(fg_signal[alpha > 0.5]))
+    else:
+        lo, hi = float(np.percentile(bg_signal, 2)), float(np.percentile(bg_signal, 98))
+        # slider 1.0 = nearest: for metric that's the smallest depth, else the largest disparity
+        focus = (hi - params.disp_focus * (hi - lo)) if metric else (lo + params.disp_focus * (hi - lo))
+    log.info("focus=%.3f (%s)", focus, "m" if metric else "disp")
     blur_p = params.blur_params(disp_focus=focus)
+
+    radius_fg = focal_radius(fg_signal, focus, metric, blur_p)
+    radius_bg = focal_radius(bg_signal, focus, metric, blur_p)
+    if dbg:
+        rmax = max(float(radius_bg.max()), 1e-3)
+        dump("03_radius_bg.png", radius_bg / rmax, gray=True)
+        dump("03b_radius_fg.png", radius_fg / rmax, gray=True)
 
     # 5 — remove subject + inpaint the hole → clean background plate
     emit(*_STAGES[4], 4 / n)
     clean_bg = _inpaint.fill_background(work, alpha, bundle)
     dump("04_clean_bg.jpg", clean_bg)
 
-    # 6 — blur the CLEAN background by BACKGROUND depth (depth-graded, linear-light scatter)
+    # 6 — blur the CLEAN background by its depth-driven CoC (linear-light scatter)
     emit(*_STAGES[5], 5 / n)
-    blurred_bg = render_lens_blur(clean_bg, disp_bg, blur_p)
+    blurred_bg = render_lens_blur(clean_bg, radius_bg, blur_p)
     dump("05_blurred_bg.jpg", blurred_bg)
 
-    # 7 — composite the subject with its OWN depth-of-field over the blurred background
+    # 7 — composite the subject over the blurred background. For cinematic subject-DoF, blur the
+    # ORIGINAL subject color (not the decontaminated F, whose bright extrapolated edge would be
+    # amplified into a white halo by the blur); the sharp path keeps F for its clean anti-halo edge.
     emit(*_STAGES[6], 6 / n)
-    out = _compose.compose(fg, alpha, blurred_bg, disp_fg, blur_p)
+    fg_color = (work.astype(np.float32) / 255.0) if params.subject_dof else fg
+    out = _compose.compose(fg_color, alpha, blurred_bg, radius_fg, blur_p)
     dump("06_output.jpg", out)
 
     emit("done", "Done", 1.0)

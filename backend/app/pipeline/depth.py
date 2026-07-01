@@ -40,21 +40,24 @@ def _sigma(disp: np.ndarray) -> float:
 def smooth_depth(disp: np.ndarray) -> np.ndarray:
     """Plain Gaussian smoothing so the DoF grades cleanly rather than blotching from per-pixel
     model noise. NOT edge-aware on purpose — locking depth to image texture (tattoos, patterns)
-    would create false depth steps → sharp/blur seams. Used for the SUBJECT's depth."""
-    return np.clip(cv2.GaussianBlur(disp.astype(np.float32), (0, 0), sigmaX=_sigma(disp)), 0.0, 1.0)
+    would create false depth steps → sharp/blur seams. Range-preserving (metres or [0,1])."""
+    return cv2.GaussianBlur(disp.astype(np.float32), (0, 0), sigmaX=_sigma(disp))
 
 
 def background_depth(disp: np.ndarray, subject_mask: np.ndarray) -> np.ndarray:
     """Depth field for the BACKGROUND: fill the subject's region with surrounding background
-    depth (so the subject's near-depth can't bleed outward and leave a sharp bright ring around
-    the silhouette), then smooth. This keeps the true depth discontinuity AT the silhouette."""
+    depth (so the subject's near-depth can't bleed outward and leave a sharp ring around the
+    silhouette), then smooth. Keeps the true depth discontinuity AT the silhouette. Works in the
+    depth's own units (metres for Depth Pro, [0,1] otherwise)."""
     h, w = disp.shape[:2]
     grow = max(3, (min(h, w) // 120) | 1)
     hole = cv2.dilate((subject_mask > 0).astype(np.uint8) * 255,
                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
-    d8 = (np.clip(disp, 0, 1) * 255).astype(np.uint8)
+    lo, rng = float(disp.min()), max(float(disp.max() - disp.min()), 1e-6)
+    d8 = np.clip((disp - lo) / rng * 255.0, 0, 255).astype(np.uint8)
     filled = cv2.inpaint(d8, hole, max(3, grow), cv2.INPAINT_TELEA).astype(np.float32) / 255.0
-    return np.clip(cv2.GaussianBlur(filled, (0, 0), sigmaX=_sigma(disp)), 0.0, 1.0)
+    filled = filled * rng + lo  # back to original units
+    return cv2.GaussianBlur(filled, (0, 0), sigmaX=_sigma(disp))
 
 
 def _normalize(d: np.ndarray) -> np.ndarray:
@@ -83,10 +86,12 @@ def _model_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
             pass
     if pred.shape != (h, w):
         pred = cv2.resize(pred, (w, h), interpolation=cv2.INTER_LINEAR)
-    # Depth Pro outputs metric depth (meters) → disparity = 1/depth (near = large). Depth Anything
-    # outputs a disparity-like value already (near = large) → use directly.
-    disp = 1.0 / np.clip(pred, 1e-3, None) if bundle.depth_metric else pred
-    return _normalize(disp)
+    if bundle.depth_metric:
+        # Depth Pro → metric depth in METERS. Keep it metric (do NOT normalize) so the blur can
+        # use real distances for a true optical falloff. Clip only wild outliers.
+        return np.clip(pred, 0.1, 100.0).astype(np.float32)
+    # Depth Anything → relative disparity-like (near = large); normalize to [0,1] as a proxy.
+    return _normalize(pred)
 
 
 def _radial_disparity(rgb_u8: np.ndarray) -> np.ndarray:
