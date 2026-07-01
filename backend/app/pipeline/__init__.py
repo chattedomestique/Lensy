@@ -25,7 +25,7 @@ from . import inpaint as _inpaint
 from . import layered as _layered
 from . import matte as _matte
 from . import refine as _refine
-from .blur import BlurParams, focal_radius
+from .blur import BlurParams
 from .runtime import ModelBundle
 
 log = logging.getLogger("lensy.pipeline")
@@ -78,98 +78,80 @@ def _downscale(rgb_u8: np.ndarray, long_edge: int) -> np.ndarray:
     return cv2.resize(rgb_u8, (round(w * s), round(h * s)), interpolation=cv2.INTER_AREA)
 
 
+def downscale_to_working(rgb_u8: np.ndarray, working_res: int) -> np.ndarray:
+    return _downscale(rgb_u8, working_res)
+
+
+def analyze(rgb_u8: np.ndarray, params: RenderParams, bundle: ModelBundle):
+    """Fast first pass for the interactive editor: matte + depth only (no inpaint/blur).
+    Returns (work, alpha, depth_norm) where depth_norm is [0,1], NEAR = 1 (white). Cheap enough
+    (~a few seconds with Depth Anything) to let the user then refine the depth map by hand."""
+    work = _downscale(rgb_u8, params.working_res)
+    alpha = _refine.refine_alpha(work, _matte.estimate_alpha(work, bundle))
+    signal = _depth.estimate_disparity(work, bundle)  # near = large (metric metres or [0,1])
+    if bundle.depth_metric:  # collapse metric metres → normalized disparity for the editor
+        signal = 1.0 / np.clip(signal, 0.08, None)
+    depth_norm = _depth.normalize01(signal)  # [0,1], near = 1
+    return work, alpha.astype(np.float32), depth_norm.astype(np.float32)
+
+
+def render_from(
+    work: np.ndarray,
+    alpha: np.ndarray,
+    depth_norm: np.ndarray,      # [0,1], near = 1 — may be the user-edited depth map
+    params: RenderParams,
+    bundle: ModelBundle,
+    progress: Progress | None = None,
+) -> np.ndarray:
+    """Render the final image from a (possibly hand-edited) depth map + matte: decontaminate,
+    inpaint the subject hole, and run the layered occlusion-aware DoF. Depth is treated as
+    normalized [0,1] disparity (near = 1), so the editor's levels/smoothing shape the falloff."""
+
+    def emit(key: str, label: str, frac: float) -> None:
+        if progress:
+            try:
+                progress(key, label, frac)
+            except Exception:
+                log.debug("progress callback raised", exc_info=True)
+
+    t0 = time.time()
+    n = len(_STAGES)
+    metric = False  # edited depth is normalized disparity, not metric
+
+    emit(*_STAGES[2], 2 / n)
+    fg = _refine.decontaminate(work, alpha, bundle)
+
+    emit(*_STAGES[3], 3 / n)
+    fg_signal = _depth.smooth_depth(depth_norm)
+    bg_signal = _depth.background_depth(depth_norm, (alpha > 0.5).astype(np.uint8))
+    if params.autofocus and int((alpha > 0.5).sum()) > 64:
+        focus = float(np.median(fg_signal[alpha > 0.5]))
+    else:
+        lo, hi = float(np.percentile(bg_signal, 2)), float(np.percentile(bg_signal, 98))
+        focus = lo + params.disp_focus * (hi - lo)  # slider 1.0 = nearest (largest disparity)
+    blur_p = params.blur_params(disp_focus=focus)
+
+    emit(*_STAGES[4], 4 / n)
+    clean_bg = _inpaint.fill_background(work, alpha, bundle)
+
+    emit(*_STAGES[5], 5 / n)
+    emit(*_STAGES[6], 6 / n)
+    out = _layered.render_layered_dof(fg, alpha, clean_bg, fg_signal, bg_signal, focus, metric, blur_p)
+
+    emit("done", "Done", 1.0)
+    log.info("render_from done in %.2fs (work res %s)", time.time() - t0, work.shape[:2])
+    return out
+
+
 def run_pipeline(
     rgb_u8: np.ndarray,
     params: RenderParams,
     bundle: ModelBundle,
     progress: Progress | None = None,
 ) -> np.ndarray:
-    """Run the full pipeline. Input/return: uint8 RGB (HxWx3)."""
-
-    def emit(key: str, label: str, frac: float) -> None:
-        if progress:
-            try:
-                progress(key, label, frac)
-            except Exception:  # progress must never break a render
-                log.debug("progress callback raised", exc_info=True)
-
-    t0 = time.time()
-    work = _downscale(rgb_u8, params.working_res)
-    n = len(_STAGES)
-
-    # optional diagnostic capture: set LENSY_DEBUG_DIR to dump input + every stage as images
-    dbg = os.environ.get("LENSY_DEBUG_DIR")
-    if dbg:
-        os.makedirs(dbg, exist_ok=True)
-
-    def dump(name: str, arr: np.ndarray, gray: bool = False) -> None:
-        if not dbg:
-            return
-        try:
-            if gray:
-                cv2.imwrite(os.path.join(dbg, name), (np.clip(arr, 0, 1) * 255).astype(np.uint8))
-            else:
-                cv2.imwrite(os.path.join(dbg, name), cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
-        except Exception:
-            log.debug("debug dump failed for %s", name, exc_info=True)
-
-    dump("00_input.jpg", work)
-
-    # 1 — matte (soft alpha)
-    emit(*_STAGES[0], 0 / n)
-    alpha = _matte.estimate_alpha(work, bundle)
-
-    # 2 — refine alpha to true edges
-    emit(*_STAGES[1], 1 / n)
-    alpha = _refine.refine_alpha(work, alpha)
-    dump("01_alpha.png", alpha, gray=True)
-
-    # 3 — decontaminate foreground color (THE anti-halo step)
-    emit(*_STAGES[2], 2 / n)
-    fg = _refine.decontaminate(work, alpha, bundle)
-    dump("02_fg.jpg", (np.clip(fg, 0, 1) * 255).astype(np.uint8))
-
-    # 4 — depth. Keep it in real units (metres for Depth Pro) and build two smoothed fields that
-    # DON'T bleed across the silhouette: one for the subject, one for the background (subject hole
-    # filled with background depth). The blur radius is the true optical CoC from these distances.
-    emit(*_STAGES[3], 3 / n)
-    metric = bundle.depth_metric
-    signal = _depth.estimate_disparity(work, bundle)
-    fg_signal = _depth.smooth_depth(signal)
-    bg_signal = _depth.background_depth(signal, (alpha > 0.5).astype(np.uint8))
-
-    # focal distance (in the depth's own units): auto = median depth under the matte.
-    if params.autofocus and int((alpha > 0.5).sum()) > 64:
-        focus = float(np.median(fg_signal[alpha > 0.5]))
-    else:
-        lo, hi = float(np.percentile(bg_signal, 2)), float(np.percentile(bg_signal, 98))
-        # slider 1.0 = nearest: for metric that's the smallest depth, else the largest disparity
-        focus = (hi - params.disp_focus * (hi - lo)) if metric else (lo + params.disp_focus * (hi - lo))
-    log.info("focus=%.3f (%s)", focus, "m" if metric else "disp")
-    blur_p = params.blur_params(disp_focus=focus)
-
-    if dbg:
-        rb = focal_radius(bg_signal, focus, metric, blur_p)
-        dump("03_radius_bg.png", rb / max(float(rb.max()), 1e-3), gray=True)
-
-    # 5 — remove subject + inpaint the hole → clean background plate (the disocclusion fill)
-    emit(*_STAGES[4], 4 / n)
-    clean_bg = _inpaint.fill_background(work, alpha, bundle)
-    dump("04_clean_bg.jpg", clean_bg)
-
-    # 6 + 7 — layered occlusion-aware depth-of-field: background sheet + foreground sheet, each
-    # rendered by fine depth-slice energy-conserving aperture scatter, composited back-to-front,
-    # then foreground over background. Physically-based lens/aperture optics (see layered.py).
-    emit(*_STAGES[5], 5 / n)
-    emit(*_STAGES[6], 6 / n)
-    out = _layered.render_layered_dof(
-        fg, alpha, clean_bg, fg_signal, bg_signal, focus, metric, blur_p
-    )
-    dump("06_output.jpg", out)
-
-    emit("done", "Done", 1.0)
-    log.info("pipeline done in %.2fs (work res %s)", time.time() - t0, work.shape[:2])
-    return out
+    """One-shot: analyze then render (automatic depth). Input/return: uint8 RGB (HxWx3)."""
+    work, alpha, depth_norm = analyze(rgb_u8, params, bundle)
+    return render_from(work, alpha, depth_norm, params, bundle, progress)
 
 
-__all__ = ["RenderParams", "run_pipeline", "ModelBundle"]
+__all__ = ["RenderParams", "run_pipeline", "analyze", "render_from", "downscale_to_working", "ModelBundle"]

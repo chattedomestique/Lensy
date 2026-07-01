@@ -33,7 +33,8 @@ def test_pipeline_runs_with_fallbacks():
 
     assert out.shape == photo.shape
     assert out.dtype == np.uint8
-    assert {"matte", "blur", "compose", "done"} <= {s for s, _ in stages}
+    # render_from emits from decontaminate onward (matte/depth happen in analyze())
+    assert {"blur", "compose", "done"} <= {s for s, _ in stages}
     # output should differ from input (we actually rendered something)
     assert not np.array_equal(out, photo)
 

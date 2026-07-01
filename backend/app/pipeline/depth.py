@@ -68,6 +68,11 @@ def _normalize(d: np.ndarray) -> np.ndarray:
     return np.clip((d - lo) / (hi - lo), 0.0, 1.0)
 
 
+def normalize01(d: np.ndarray) -> np.ndarray:
+    """Public: percentile-normalize any depth/disparity signal to [0,1]."""
+    return _normalize(d)
+
+
 def _model_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
     import torch
     from PIL import Image

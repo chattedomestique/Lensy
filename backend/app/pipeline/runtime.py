@@ -126,13 +126,12 @@ def _load_birefnet(device: str):
     return model, None  # BiRefNet preprocessing is simple; done inline in matte.py
 
 
-# Depth model. Default is **Apple Depth Pro** (`apple/DepthPro-hf`) — richest, most continuous
-# depth with the sharpest object boundaries (the brief's first pick). SLOW on a 16GB M4
-# (~40-80s/render) and memory-hungry, but quality is the priority. Override with LENSY_DEPTH_MODEL
-# to trade quality for speed:
-#   depth-anything/Depth-Anything-V2-Large-hf   (~1.5s, good gradient)
+# Depth model. Default **Depth Anything V2 Large** (~1.5s) — fast enough for the interactive
+# depth-map editor, where the user refines levels/smoothing by hand. Options via LENSY_DEPTH_MODEL:
+#   depth-anything/Depth-Anything-V2-Large-hf   (~1.5s, good gradient — default)
 #   depth-anything/Depth-Anything-V2-Base-hf    (~0.4s, fastest)
-_DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "apple/DepthPro-hf")
+#   apple/DepthPro-hf                            (~40-80s, richest metric depth, memory-heavy)
+_DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Large-hf")
 
 
 def _load_depth(device: str):
