@@ -86,13 +86,12 @@
               </div>
               <div class="control">
                 <label><span class="title">Anchors</span><span id="anchor-hint" class="val">pick one</span></label>
-                <div id="anchors" class="anchor-grid" role="group" aria-label="Depth anchors">
+                <div id="anchors" class="anchor-grid three" role="group" aria-label="Depth anchors">
                   <button data-anchor="foreground">Foreground</button>
                   <button data-anchor="subject">Subject</button>
-                  <button data-anchor="midground">Midground</button>
                   <button data-anchor="background">Background</button>
                 </div>
-                <div class="hint">Pick one, then tap the image to place it. Subject = white (in focus); nearer &amp; farther fade to black.</div>
+                <div class="hint">Pick one, then drag on the image to place it. Subject = white (in focus); nearer &amp; farther fade to black.</div>
               </div>
               <div class="control">
                 <label for="d-sep"><span class="title">Separation</span><span id="d-sep-val" class="val">0.00</span></label>
@@ -146,6 +145,11 @@
         </aside>
       </div>
     </main>
+
+    <div id="loupe" class="loupe hidden" aria-hidden="true">
+      <canvas id="loupe-canvas" width="150" height="150"></canvas>
+      <div class="loupe-cross"></div>
+    </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script type="module" src="/src/main.ts"></script>

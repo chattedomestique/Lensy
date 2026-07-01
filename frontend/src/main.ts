@@ -49,6 +49,18 @@ const editor = new DepthEditor();
 const depthCanvas = document.createElement("canvas");
 depthCanvas.className = "stage-img";
 
+const loupe = $("loupe");
+const loupeCanvas = $("loupe-canvas") as HTMLCanvasElement;
+const origImg = new Image();
+origImg.crossOrigin = "anonymous";
+
+// anchor placement (drag) state
+let placing = false;
+let placingName: AnchorName = "subject";
+let rafPending = false;
+let lastNx = 0;
+let lastNy = 0;
+
 const controls = new Controls(() => {});
 const settings: DepthSettings = { ...DEFAULT_SETTINGS };
 
@@ -83,14 +95,14 @@ function showPhoto(): void {
   img.src = originalUrl;
   img.className = "stage-img";
   img.alt = "Your photo";
-  img.addEventListener("click", onStageTap);
+  bindPlacement(img);
   stage.appendChild(img);
   stage.appendChild(focusRing);
 }
 function showDepth(): void {
   editor.drawFocus(depthCanvas);
   stage.innerHTML = "";
-  depthCanvas.onclick = onStageTap;
+  bindPlacement(depthCanvas);
   stage.appendChild(depthCanvas);
   stage.appendChild(focusRing);
 }
@@ -118,26 +130,73 @@ document.querySelectorAll<HTMLButtonElement>("#anchors button").forEach((b) => {
   b.addEventListener("click", () => setArmed(armed === b.dataset.anchor ? null : (b.dataset.anchor as AnchorName)));
 });
 
-function onStageTap(e: MouseEvent): void {
-  if (!editor.ready) return;
-  const el = e.currentTarget as HTMLElement;
+// drag an anchor around the image with a zoomed crosshair loupe; live-updates the depth map
+function bindPlacement(el: HTMLElement): void {
+  el.style.touchAction = "none";
+  el.addEventListener("pointerdown", (e) => {
+    if (!editor.ready) return;
+    e.preventDefault();
+    placing = true;
+    placingName = armed ?? "subject"; // a plain drag sets the Subject (focus) point
+    loupe.classList.remove("hidden");
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      /* some pointer types can't be captured — fine */
+    }
+    updatePlacement(e, el);
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (placing) updatePlacement(e, el);
+  });
+  const end = () => {
+    if (!placing) return;
+    placing = false;
+    loupe.classList.add("hidden");
+    document
+      .querySelector<HTMLButtonElement>(`#anchors button[data-anchor="${placingName}"]`)
+      ?.classList.add("set");
+    setArmed(null);
+  };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+}
+
+function updatePlacement(e: PointerEvent, el: HTMLElement): void {
   const rect = el.getBoundingClientRect();
-  const nx = (e.clientX - rect.left) / rect.width;
-  const ny = (e.clientY - rect.top) / rect.height;
-  const name: AnchorName = armed ?? "subject"; // a plain tap sets the Subject (focus) point
-  editor.setAnchor(name, nx, ny);
-  document
-    .querySelector<HTMLButtonElement>(`#anchors button[data-anchor="${name}"]`)
-    ?.classList.add("set");
-  refreshDepthView();
-  // focus-ring feedback
-  focusRing.style.left = `${e.clientX - rect.left}px`;
-  focusRing.style.top = `${e.clientY - rect.top}px`;
-  focusRing.classList.remove("show");
-  void focusRing.offsetWidth;
-  focusRing.classList.add("show");
-  toast(`${name} anchor set`);
-  setArmed(null);
+  lastNx = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  lastNy = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+  positionLoupe(e.clientX, e.clientY);
+  drawLoupe(lastNx, lastNy);
+  if (!rafPending) {
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      editor.setAnchor(placingName, lastNx, lastNy);
+      refreshDepthView();
+    });
+  }
+}
+
+function positionLoupe(clientX: number, clientY: number): void {
+  const size = 150;
+  const x = Math.min(window.innerWidth - size - 8, Math.max(8, clientX - size / 2));
+  const y = Math.max(8, clientY - size - 24); // float above the finger
+  loupe.style.left = `${x}px`;
+  loupe.style.top = `${y}px`;
+}
+
+function drawLoupe(nx: number, ny: number): void {
+  const ctx = loupeCanvas.getContext("2d")!;
+  const iw = origImg.naturalWidth;
+  const ih = origImg.naturalHeight;
+  ctx.clearRect(0, 0, loupeCanvas.width, loupeCanvas.height);
+  if (!iw) return;
+  const zoom = 4;
+  const cw = loupeCanvas.width / zoom;
+  const ch = loupeCanvas.height / zoom;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(origImg, nx * iw - cw / 2, ny * ih - ch / 2, cw, ch, 0, 0, loupeCanvas.width, loupeCanvas.height);
 }
 
 // --- depth sliders ---
@@ -195,6 +254,7 @@ function acceptFile(file: File): void {
   currentFile = file;
   if (originalUrl) URL.revokeObjectURL(originalUrl);
   originalUrl = URL.createObjectURL(file);
+  origImg.src = originalUrl; // loupe source
   analyzeId = null;
   depthTools.classList.add("hidden");
   view = "photo";

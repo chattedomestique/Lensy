@@ -5,7 +5,7 @@
 // depth map centered on the subject (subject = 0.5, nearer → 1, farther → 0) so the renderer's
 // |depth − focus| gives exactly the blur shown, with front/back preserved for occlusion.
 
-export type AnchorName = "subject" | "foreground" | "midground" | "background";
+export type AnchorName = "subject" | "foreground" | "background";
 
 export interface DepthSettings {
   separation: number; // 0..1 — steepen the in-focus ↔ blurred split
@@ -112,7 +112,7 @@ export class DepthEditor {
   }
 
   /** Anchor depths, filling in sensible defaults from the raw map + matte. */
-  private resolvedAnchors(): { s: number; f: number; m: number; b: number } {
+  private resolvedAnchors(): { s: number; f: number; b: number } {
     let subjSum = 0;
     let subjN = 0;
     let mn = 1;
@@ -127,55 +127,56 @@ export class DepthEditor {
       }
     }
     const autoS = subjN > 0 ? subjSum / subjN : (mn + mx) / 2;
-    let s = this.anchors.subject ?? autoS;
+    const s = this.anchors.subject ?? autoS;
     let f = this.anchors.foreground ?? mx; // nearest
     let b = this.anchors.background ?? mn; // farthest
-    let m = this.anchors.midground ?? (s + b) / 2;
-    // keep the ordering sane: background ≤ midground ≤ subject ≤ foreground
     f = Math.max(f, s + 1e-3);
     b = Math.min(b, s - 1e-3);
-    m = clamp01(Math.min(Math.max(m, b + 1e-3), s - 1e-3));
-    return { s, f, m, b };
+    return { s, f, b };
   }
 
   private recompute(): void {
     const n = this.w * this.h;
-    const { s, f, m, b } = this.resolvedAnchors();
+    const { s, f, b } = this.resolvedAnchors();
     const sep = 1 + this.settings.separation * 2.2;
 
+    // 1) background focus field — the falloff for everything OUTSIDE the subject. Separation and
+    //    smoothing act here only, so the subject (forced white below) is never touched.
+    const bgf = new Float32Array(n);
     for (let i = 0; i < n; i++) {
       const d = this.rawDepth[i];
-      // background focus from depth distance to the subject plane (front & back both fall to 0)
-      let bgf: number;
-      if (d >= s) {
-        bgf = 1 - (d - s) / Math.max(f - s, 1e-3); // in front of subject
-      } else if (d >= m) {
-        bgf = 1 - 0.5 * ((s - d) / Math.max(s - m, 1e-3)); // subject → midground (0.5)
-      } else {
-        bgf = 0.5 - 0.5 * ((m - d) / Math.max(m - b, 1e-3)); // midground → background (0)
-      }
-      bgf = clamp01(bgf);
-      // the SUBJECT (matte) is always in focus (white); the rest uses the depth falloff
-      const mt = this.matte[i];
-      let fo = clamp01(mt + (1 - mt) * bgf);
-      fo = clamp01(0.5 + (fo - 0.5) * sep); // separation steepens the split
-      this.focus[i] = fo;
-      // edited depth centered on the subject, keeping near/far sign for occlusion
-      const blur = 1 - fo;
-      this.edited[i] = d >= s ? 0.5 + 0.5 * blur : 0.5 - 0.5 * blur;
+      let v = d >= s ? 1 - (d - s) / Math.max(f - s, 1e-3) : 1 - (s - d) / Math.max(s - b, 1e-3);
+      v = clamp01(v);
+      bgf[i] = clamp01(0.5 + (v - 0.5) * sep); // separation steepens the fg↔bg split (bg only)
     }
 
-    // smooth only the background gradient (keep the subject crisp)
+    // 2) smoothing — a matte-EXCLUDING blur so the subject's white never bleeds into the gradient;
+    //    it only blends foreground↔background.
     if (this.settings.smoothing > 0.001) {
       const r = Math.max(1, Math.round(this.settings.smoothing * Math.max(this.w, this.h) * 0.06));
-      const be = boxBlur(this.edited, this.w, this.h, r);
-      const bf = boxBlur(this.focus, this.w, this.h, r);
+      const wmap = new Float32Array(n);
+      const wbgf = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const w = 1 - this.matte[i]; // background weight
+        wmap[i] = w;
+        wbgf[i] = bgf[i] * w;
+      }
+      const num = boxBlur(wbgf, this.w, this.h, r);
+      const den = boxBlur(wmap, this.w, this.h, r);
       const a = this.settings.smoothing;
       for (let i = 0; i < n; i++) {
-        const bg = 1 - this.matte[i];
-        this.edited[i] = this.edited[i] * (1 - bg * a) + be[i] * (bg * a);
-        this.focus[i] = this.focus[i] * (1 - bg * a) + bf[i] * (bg * a);
+        const sm = den[i] > 1e-3 ? num[i] / den[i] : bgf[i];
+        bgf[i] = bgf[i] * (1 - a) + sm * a;
       }
+    }
+
+    // 3) blend: the subject (matte) is always in focus (white); the rest uses the falloff.
+    for (let i = 0; i < n; i++) {
+      const mt = this.matte[i];
+      const fo = clamp01(mt + (1 - mt) * bgf[i]);
+      this.focus[i] = fo;
+      const blur = 1 - fo;
+      this.edited[i] = this.rawDepth[i] >= s ? 0.5 + 0.5 * blur : 0.5 - 0.5 * blur;
     }
   }
 

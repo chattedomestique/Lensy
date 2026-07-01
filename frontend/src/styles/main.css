@@ -265,8 +265,26 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px 
 .depth-tools { display: flex; flex-direction: column; gap: var(--s5); }
 #generate, #save, #reset-depth { width: 100%; }
 
+/* --- loupe (zoom crosshair while placing an anchor) --- */
+.loupe {
+  position: fixed; width: 150px; height: 150px; border-radius: 50%;
+  overflow: hidden; pointer-events: none; z-index: 50;
+  border: 3px solid var(--surface); box-shadow: var(--shadow), 0 0 0 1px var(--line);
+  background: var(--surface-2);
+}
+.loupe canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.loupe-cross { position: absolute; inset: 0; pointer-events: none; }
+.loupe-cross::before, .loupe-cross::after {
+  content: ""; position: absolute; background: color-mix(in oklab, var(--accent) 85%, white);
+  box-shadow: 0 0 2px rgba(0,0,0,0.6);
+}
+.loupe-cross::before { left: 50%; top: 0; bottom: 0; width: 1.5px; transform: translateX(-50%); }
+.loupe-cross::after { top: 50%; left: 0; right: 0; height: 1.5px; transform: translateY(-50%); }
+
 /* --- anchor picker --- */
 .anchor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2); }
+.anchor-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+.anchor-grid.three button { padding: 9px 4px; font-size: 12px; }
 .anchor-grid button {
   font: inherit; font-size: 13px; font-weight: 600; color: var(--text);
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-btn);
