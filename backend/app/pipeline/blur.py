@@ -39,6 +39,9 @@ class BlurParams:
     subject_dof: bool = False  # (cinematic removed) subject composited sharp
     n_layers: int = 22         # depth slices for the layered occlusion renderer
     chroma: float = 0.0        # lateral chromatic aberration in the bokeh (0 = off; ~0.01 subtle)
+    swirl: float = 0.0         # Petzval swirly bokeh — tangential smear growing toward the edges
+    sweet: float = 0.0         # Lensbaby sweet-spot intensity — extra radial blur outside the spot
+    sweet_size: float = 0.35   # radius (0..1 of half-diagonal) of the sharp sweet spot
 
 
 # ---- aperture kernels ---------------------------------------------------------------

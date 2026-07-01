@@ -162,7 +162,10 @@ async def analyze_photo_img(aid: str) -> Response:
 # ----------------------------------- render ----------------------------------------
 
 
-def _params_from_form(k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye, working_res) -> RenderParams:
+def _params_from_form(
+    k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
+    swirl, sweet, sweet_size, working_res,
+) -> RenderParams:
     return RenderParams(
         k=float(np.clip(k, 0, 100)),
         disp_focus=float(np.clip(disp_focus, 0, 1)),
@@ -172,6 +175,9 @@ def _params_from_form(k, disp_focus, autofocus, subject_dof, blades, rotation, h
         rotation=float(rotation),
         highlight_boost=float(np.clip(highlight_boost, 0, 2)),
         cat_eye=float(np.clip(cat_eye, 0, 1)),
+        swirl=float(np.clip(swirl, 0, 1)),
+        sweet=float(np.clip(sweet, 0, 1)),
+        sweet_size=float(np.clip(sweet_size, 0.05, 1)),
         working_res=int(np.clip(working_res, 512, 4096)),
     )
 
@@ -221,12 +227,18 @@ async def start_render(
     rotation: float = Form(0.0),
     highlight_boost: float = Form(0.18),
     cat_eye: float = Form(0.2),
+    swirl: float = Form(0.0),
+    sweet: float = Form(0.0),
+    sweet_size: float = Form(0.35),
     working_res: int = Form(2048),
 ) -> JSONResponse:
     bundle = getattr(request.app.state, "bundle", None)
     if bundle is None:
         return _friendly(503, "warming", "Models are still loading — try again in a moment.")
-    params = _params_from_form(k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye, working_res)
+    params = _params_from_form(
+        k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
+        swirl, sweet, sweet_size, working_res,
+    )
 
     # Path A — render from a prior analysis + (optionally) a hand-edited depth map
     if analyze_id:

@@ -15,12 +15,18 @@ const BLADE_LABEL: Record<number, string> = { 0: "circular", 5: "5-blade", 6: "6
 export class Controls {
   private k = $("k") as HTMLInputElement;
   private highlight = $("highlight") as HTMLInputElement;
+  private swirl = $("swirl") as HTMLInputElement;
+  private sweet = $("sweet") as HTMLInputElement;
+  private sweetSize = $("sweet-size") as HTMLInputElement;
   private bladesGroup = $("blades");
   private blades = 0;
 
   constructor(private onChange: () => void) {
     this.k.addEventListener("input", () => this.reflect());
     this.highlight.addEventListener("input", () => this.reflect());
+    [this.swirl, this.sweet, this.sweetSize].forEach((s) =>
+      s.addEventListener("input", () => this.reflect()),
+    );
     this.bladesGroup.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
       btn.addEventListener("click", () => {
         this.blades = Number(btn.dataset.blades ?? "0");
@@ -43,12 +49,18 @@ export class Controls {
       blades: this.blades,
       highlight_boost: Number(this.highlight.value) / 100,
       cat_eye: 0.2,
+      swirl: Number(this.swirl.value) / 100,
+      sweet: Number(this.sweet.value) / 100,
+      sweet_size: Number(this.sweetSize.value) / 100,
     };
   }
 
   reset(): void {
     this.k.value = "60";
     this.highlight.value = "18";
+    this.swirl.value = "0";
+    this.sweet.value = "0";
+    this.sweetSize.value = "35";
     this.blades = 0;
     this.bladesGroup
       .querySelectorAll<HTMLButtonElement>("button")
@@ -60,6 +72,9 @@ export class Controls {
     $("k-val").textContent = this.k.value;
     $("highlight-val").textContent = (Number(this.highlight.value) / 100).toFixed(2);
     $("blades-val").textContent = BLADE_LABEL[this.blades] ?? `${this.blades}-blade`;
+    $("swirl-val").textContent = (Number(this.swirl.value) / 100).toFixed(2);
+    $("sweet-val").textContent = (Number(this.sweet.value) / 100).toFixed(2);
+    $("sweet-size-val").textContent = (Number(this.sweetSize.value) / 100).toFixed(2);
     this.onChange();
   }
 }

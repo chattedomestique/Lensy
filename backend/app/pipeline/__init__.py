@@ -44,6 +44,9 @@ class RenderParams:
     rotation: float = 0.0
     highlight_boost: float = 0.18
     cat_eye: float = 0.2
+    swirl: float = 0.0           # Petzval swirly bokeh
+    sweet: float = 0.0           # Lensbaby sweet-spot blur intensity
+    sweet_size: float = 0.35     # sharp sweet-spot radius
     working_res: int = 2048      # long-edge px the pipeline runs at
 
     def blur_params(self, disp_focus: float | None = None) -> BlurParams:
@@ -55,6 +58,9 @@ class RenderParams:
             rotation=self.rotation,
             highlight_boost=self.highlight_boost,
             cat_eye=self.cat_eye,
+            swirl=self.swirl,
+            sweet=self.sweet,
+            sweet_size=self.sweet_size,
         )
 
 

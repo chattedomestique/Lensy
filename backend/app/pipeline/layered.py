@@ -131,6 +131,46 @@ def render_sheet(
     return acc_c, np.clip(acc_a, 0.0, 1.0), bloom
 
 
+def _field(h: int, w: int):
+    """Normalized field radius (0 at center → ~1 at the corners) and the center coords."""
+    cx, cy = w / 2.0, h / 2.0
+    halfdiag = 0.5 * float(np.hypot(w, h))
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    return (np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / halfdiag).astype(np.float32), cx, cy
+
+
+def _add_sweet_spot(radius_px: np.ndarray, p: BlurParams) -> np.ndarray:
+    """Lensbaby: a sharp central 'sweet spot', blur growing radially outward beyond it. Added to
+    the depth CoC in quadrature, so depth focus and the field blur combine like a real lens."""
+    h, w = radius_px.shape
+    r_frac, _, _ = _field(h, w)
+    max_r = max(1.0, (p.k / 100.0) * float(np.hypot(h, w)) * 0.11)
+    t = np.clip((r_frac - p.sweet_size) / max(1.0 - p.sweet_size, 1e-3), 0.0, 1.0)
+    sweet_r = p.sweet * max_r * (t * t * (3.0 - 2.0 * t))  # smoothstep growth
+    return np.sqrt(radius_px * radius_px + sweet_r * sweet_r).astype(np.float32)
+
+
+def _apply_swirl(img: np.ndarray, strength: float) -> np.ndarray:
+    """Petzval: optical-vignetting swirl approximated as a tangential (spin) blur whose angle grows
+    with field radius — off-axis bokeh streaks tangentially, curling around the sharp center."""
+    if strength <= 0:
+        return img
+    h, w = img.shape[:2]
+    r_frac, cx, cy = _field(h, w)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx, dy = xx - cx, yy - cy
+    max_ang = 0.5 * float(strength)  # radians at the corner
+    acc = np.zeros_like(img)
+    n = 9
+    for off in np.linspace(-1.0, 1.0, n):
+        ang = (off * max_ang) * (r_frac ** 1.6)  # per-pixel rotation, stronger toward edges
+        c, s = np.cos(ang), np.sin(ang)
+        srcx = np.ascontiguousarray(cx + dx * c - dy * s, dtype=np.float32)
+        srcy = np.ascontiguousarray(cy + dx * s + dy * c, dtype=np.float32)
+        acc += cv2.remap(img, srcx, srcy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return (acc / n).astype(np.float32)
+
+
 def render_layered_dof(
     fg_srgb: np.ndarray,
     alpha: np.ndarray,
@@ -147,12 +187,16 @@ def render_layered_dof(
     # --- background sheet (opaque, complete via inpaint) ---
     bg_lin = srgb_to_linear(clean_bg_u8.astype(np.float32) / 255.0)
     bg_radius = focal_radius(bg_signal, focus, metric, p)
+    if p.sweet > 0:  # Lensbaby sweet spot — extra radial blur outside the sharp center
+        bg_radius = _add_sweet_spot(bg_radius, p)
     bg_coord = _layer_coord(bg_signal, metric)
     excess = np.clip(bg_lin - _HI_THRESH, 0.0, None) if p.highlight_boost > 0 else None
     bgc, bga, bgbloom = render_sheet(bg_lin, np.ones((h, w), np.float32), bg_coord, bg_radius, p, excess)
     bg_rendered = bgc / np.clip(bga, 1e-4, None)  # un-premultiply the opaque plate
     if excess is not None:
         bg_rendered = bg_rendered + (p.highlight_boost * 2.0) * bgbloom
+    if p.swirl > 0:  # Petzval swirl — tangential smear of the background, subject stays sharp
+        bg_rendered = _apply_swirl(bg_rendered, p.swirl)
 
     # --- foreground sheet (subject) ---
     fg_lin = srgb_to_linear(np.clip(fg_srgb, 0.0, 1.0))

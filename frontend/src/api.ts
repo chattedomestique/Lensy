@@ -12,6 +12,9 @@ export interface RenderParams {
   blades: number; // 0 = circular, else N-gon
   highlight_boost: number; // 0..2 bloom strength
   cat_eye: number; // 0..1
+  swirl: number; // 0..1 Petzval swirl
+  sweet: number; // 0..1 Lensbaby sweet-spot intensity
+  sweet_size: number; // 0..1 sweet-spot radius
 }
 
 export interface ProgressEvent {
@@ -84,6 +87,9 @@ function appendParams(form: FormData, params: RenderParams): void {
   form.append("blades", String(params.blades));
   form.append("highlight_boost", String(params.highlight_boost));
   form.append("cat_eye", String(params.cat_eye));
+  form.append("swirl", String(params.swirl));
+  form.append("sweet", String(params.sweet));
+  form.append("sweet_size", String(params.sweet_size));
 }
 
 /** Render from an analysis + an (edited) depth-map PNG blob. */
