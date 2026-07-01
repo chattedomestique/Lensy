@@ -247,15 +247,34 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px 
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
 .seg button:hover { color: var(--text); }
 
-/* --- depth-map editor group --- */
-.depth-controls {
-  display: flex; flex-direction: column; gap: var(--s5);
-  padding: var(--s4); margin-bottom: var(--s2);
-  background: var(--surface-2); border: 1px solid var(--line);
-  border-left: 3px solid var(--accent-2); border-radius: var(--r-panel);
-  animation: panel-in var(--t) var(--spring);
+/* --- tabs --- */
+.tabs {
+  display: flex; gap: var(--s1); padding: var(--s1);
+  background: var(--surface-2); border-radius: var(--r-btn); margin-bottom: var(--s4);
 }
-#generate { width: 100%; }
+.tab {
+  flex: 1; border: none; background: transparent; color: var(--subtle);
+  font: inherit; font-weight: 600; font-size: 13px; padding: 8px 4px;
+  border-radius: 6px; cursor: pointer; transition: all var(--t) var(--spring);
+}
+.tab[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
+.tab:hover { color: var(--text); }
+.tabpanel { display: flex; flex-direction: column; gap: var(--s5); animation: panel-in var(--t) var(--spring); }
+.actions { margin-top: var(--s5); padding-top: var(--s4); border-top: 1px solid var(--line); }
+
+.depth-tools { display: flex; flex-direction: column; gap: var(--s5); }
+#generate, #save, #reset-depth { width: 100%; }
+
+/* --- anchor picker --- */
+.anchor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2); }
+.anchor-grid button {
+  font: inherit; font-size: 13px; font-weight: 600; color: var(--text);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-btn);
+  padding: 9px 6px; cursor: pointer; transition: all var(--t) var(--spring);
+}
+.anchor-grid button:hover { background: var(--surface-2); }
+.anchor-grid button.armed { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent); }
+.anchor-grid button.set { border-left: 3px solid var(--accent-2); }
 
 /* --- buttons --- */
 button.btn {

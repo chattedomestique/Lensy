@@ -36,7 +36,7 @@ class BlurParams:
     cat_eye: float = 0.2       # optical vignetting toward edges (0 = off)
     n_bins: int = 10           # CoC quantization layers (legacy scatter path)
     focus_range: float = 0.12  # half-width (diopters, or normalized disparity) of the in-focus zone
-    subject_dof: bool = True   # also blur the subject by depth (cinematic) vs keep it sharp
+    subject_dof: bool = False  # (cinematic removed) subject composited sharp
     n_layers: int = 22         # depth slices for the layered occlusion renderer
     chroma: float = 0.0        # lateral chromatic aberration in the bokeh (0 = off; ~0.01 subtle)
 

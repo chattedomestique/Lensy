@@ -39,7 +39,7 @@ class RenderParams:
     k: float = 60.0
     disp_focus: float = 0.7      # focal plane in disparity space; ignored when autofocus is on
     autofocus: bool = True       # lock focus to the subject (median disparity under the matte)
-    subject_dof: bool = True     # blur the subject by depth too (cinematic) vs keep it sharp
+    subject_dof: bool = False    # (cinematic removed) subject is always composited sharp
     blades: int = 0
     rotation: float = 0.0
     highlight_boost: float = 0.18
@@ -127,8 +127,9 @@ def render_from(
     if params.autofocus and int((alpha > 0.5).sum()) > 64:
         focus = float(np.median(fg_signal[alpha > 0.5]))
     else:
-        lo, hi = float(np.percentile(bg_signal, 2)), float(np.percentile(bg_signal, 98))
-        focus = lo + params.disp_focus * (hi - lo)  # slider 1.0 = nearest (largest disparity)
+        # editor path: the edited depth is already centered on the subject, so use the focal
+        # value directly (it's in the same [0,1] depth space).
+        focus = float(np.clip(params.disp_focus, 0.0, 1.0))
     blur_p = params.blur_params(disp_focus=focus)
 
     emit(*_STAGES[4], 4 / n)

@@ -65,54 +65,56 @@
           </div>
         </section>
 
-        <!-- right: controls -->
+        <!-- right: controls (tabbed so the image stays visible) -->
         <aside class="panel">
-          <div class="controls">
-            <!-- Depth map: generate, then edit -->
+          <div class="tabs" role="tablist">
+            <button class="tab" data-tab="depth" aria-selected="true">Depth</button>
+            <button class="tab" data-tab="lens" aria-selected="false">Lens</button>
+            <button class="tab" data-tab="export" aria-selected="false">Export</button>
+          </div>
+
+          <!-- DEPTH -->
+          <div class="tabpanel" data-panel="depth">
             <button id="generate" class="btn primary" disabled>Generate depth map</button>
 
-            <div id="depth-controls" class="depth-controls hidden">
+            <div id="depth-tools" class="depth-tools hidden">
               <div class="control">
-                <label><span class="title">View</span></label>
                 <div id="view" class="seg" role="group" aria-label="View">
-                  <button data-view="photo" aria-pressed="true">Photo</button>
-                  <button data-view="depth" aria-pressed="false">Depth</button>
+                  <button data-view="photo" aria-pressed="false">Photo</button>
+                  <button data-view="depth" aria-pressed="true">Depth</button>
                 </div>
-                <div class="hint">Edit the depth map, then Render. Tap the photo to set focus.</div>
               </div>
               <div class="control">
-                <label for="d-black"><span class="title">Far point</span><span id="d-black-val" class="val">0.00</span></label>
-                <input id="d-black" type="range" min="0" max="100" value="0" />
+                <label><span class="title">Anchors</span><span id="anchor-hint" class="val">pick one</span></label>
+                <div id="anchors" class="anchor-grid" role="group" aria-label="Depth anchors">
+                  <button data-anchor="foreground">Foreground</button>
+                  <button data-anchor="subject">Subject</button>
+                  <button data-anchor="midground">Midground</button>
+                  <button data-anchor="background">Background</button>
+                </div>
+                <div class="hint">Pick one, then tap the image to place it. Subject = white (in focus); nearer &amp; farther fade to black.</div>
               </div>
               <div class="control">
-                <label for="d-white"><span class="title">Near point</span><span id="d-white-val" class="val">1.00</span></label>
-                <input id="d-white" type="range" min="0" max="100" value="100" />
-                <div class="hint">Pull Far/Near in so the subject reads white, the background black (like an expander).</div>
-              </div>
-              <div class="control">
-                <label for="d-contrast"><span class="title">Separation</span><span id="d-contrast-val" class="val">0.00</span></label>
-                <input id="d-contrast" type="range" min="0" max="100" value="0" />
-                <div class="hint">Steepen the split between near and far.</div>
+                <label for="d-sep"><span class="title">Separation</span><span id="d-sep-val" class="val">0.00</span></label>
+                <input id="d-sep" type="range" min="0" max="100" value="0" />
+                <div class="hint">Steepen the split between in-focus and blurred.</div>
               </div>
               <div class="control">
                 <label for="d-smooth"><span class="title">Smoothing</span><span id="d-smooth-val" class="val">0.00</span></label>
                 <input id="d-smooth" type="range" min="0" max="100" value="0" />
                 <div class="hint">Smooth the background gradient (keeps the subject crisp).</div>
               </div>
+              <button id="reset-depth" class="btn ghost">Reset depth edits</button>
             </div>
+          </div>
 
+          <!-- LENS -->
+          <div class="tabpanel hidden" data-panel="lens">
             <div class="control">
               <label for="k"><span class="title">Blur</span><span id="k-val" class="val">60</span></label>
               <input id="k" type="range" min="0" max="100" value="60" />
               <div class="hint">Aperture strength — how shallow the depth of field.</div>
             </div>
-
-            <div class="control">
-              <label for="focus"><span class="title">Focal plane</span><span id="focus-val" class="val">auto</span></label>
-              <input id="focus" type="range" min="0" max="100" value="70" />
-              <div class="hint">Auto-focuses on the subject. Tap the photo or drag to override.</div>
-            </div>
-
             <div class="control">
               <label><span class="title">Aperture</span><span id="blades-val" class="val">circular</span></label>
               <div id="blades" class="seg" role="group" aria-label="Aperture blades">
@@ -123,27 +125,23 @@
               </div>
               <div class="hint">Iris blades shape the bokeh.</div>
             </div>
-
             <div class="control">
               <label for="highlight"><span class="title">Highlights</span><span id="highlight-val" class="val">0.18</span></label>
               <input id="highlight" type="range" min="0" max="100" value="18" />
               <div class="hint">Subtle bloom on bright out-of-focus points. Keep it low.</div>
             </div>
+          </div>
 
-            <div class="control">
-              <label><span class="title">Subject</span><span id="dof-val" class="val">cinematic</span></label>
-              <div id="dof" class="seg" role="group" aria-label="Subject depth of field">
-                <button data-dof="1" aria-pressed="true">Cinematic</button>
-                <button data-dof="0" aria-pressed="false">Sharp</button>
-              </div>
-              <div class="hint">Cinematic blurs you by real depth too; Sharp keeps you crisp.</div>
-            </div>
+          <!-- EXPORT -->
+          <div class="tabpanel hidden" data-panel="export">
+            <div class="hint">Render your edit, then save it.</div>
+            <button id="save" class="btn primary hidden">Save photo</button>
+            <div id="export-empty" class="hint">Render first to enable saving.</div>
+          </div>
 
-            <div class="row">
-              <button id="render" class="btn primary hidden">Render</button>
-              <button id="reset" class="btn ghost" disabled>Reset</button>
-            </div>
-            <button id="save" class="btn ghost hidden">Save photo</button>
+          <div class="row actions">
+            <button id="render" class="btn primary hidden">Render</button>
+            <button id="reset" class="btn ghost" disabled>Reset all</button>
           </div>
         </aside>
       </div>

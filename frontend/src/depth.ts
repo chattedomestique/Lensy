@@ -1,18 +1,21 @@
-// Client-side depth-map editor. Loads the analyzed depth + matte, lets you reshape the depth
-// map live (levels/"expander", contrast, background smoothing), and exports the edited map as a
-// PNG the backend renders from. Works at a reduced resolution (depth is smooth, so this is plenty
-// and keeps every slider move instant); the backend upscales it to the working resolution.
+// Client-side FOCUS-MAP editor. The subject is the brightest (in focus); anything nearer OR
+// farther fades to black (more blur). You place four anchors — subject / foreground / midground
+// / background — by tapping, and the map is built from them + two global sliders. Everything is
+// instant (works at a reduced res; the backend upscales). What's exported to the backend is a
+// depth map centered on the subject (subject = 0.5, nearer → 1, farther → 0) so the renderer's
+// |depth − focus| gives exactly the blur shown, with front/back preserved for occlusion.
 
-export interface DepthAdjust {
-  black: number; // 0..1 — anything at/below maps to 0 (farthest)
-  white: number; // 0..1 — anything at/above maps to 1 (nearest); pulling this in = "expander"
-  contrast: number; // 0..1 — steepen separation around the midpoint
-  smoothing: number; // 0..1 — smooth the BACKGROUND gradient (subject depth kept crisp)
+export type AnchorName = "subject" | "foreground" | "midground" | "background";
+
+export interface DepthSettings {
+  separation: number; // 0..1 — steepen the in-focus ↔ blurred split
+  smoothing: number; // 0..1 — smooth the background gradient (subject kept crisp)
 }
 
-export const DEFAULT_ADJUST: DepthAdjust = { black: 0, white: 1, contrast: 0, smoothing: 0 };
+export const DEFAULT_SETTINGS: DepthSettings = { separation: 0, smoothing: 0 };
 
 const clampIdx = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 function loadImg(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -36,7 +39,6 @@ function toGray(img: HTMLImageElement, w: number, h: number): Float32Array {
   return out;
 }
 
-/** Separable sliding-window box blur on a single-channel float image. */
 function boxBlur(src: Float32Array, w: number, h: number, r: number): Float32Array {
   if (r < 1) return src.slice();
   const win = 2 * r + 1;
@@ -65,12 +67,19 @@ function boxBlur(src: Float32Array, w: number, h: number, r: number): Float32Arr
 export class DepthEditor {
   private w = 0;
   private h = 0;
-  private rawDepth: Float32Array = new Float32Array();
+  private rawDepth: Float32Array = new Float32Array(); // near = 1
   private matte: Float32Array = new Float32Array();
-  private adjusted: Float32Array = new Float32Array();
+  private focus: Float32Array = new Float32Array(); // 1 = in focus (white), 0 = max blur
+  private edited: Float32Array = new Float32Array(); // subject=0.5, near→1, far→0 (for backend)
+
+  anchors: Partial<Record<AnchorName, number>> = {}; // stored raw-depth values
+  settings: DepthSettings = { ...DEFAULT_SETTINGS };
 
   get ready(): boolean {
     return this.w > 0;
+  }
+  get focalValue(): number {
+    return 0.5; // subject is mapped to the middle of the edited depth
   }
 
   async load(depthSrc: string, matteSrc: string, maxEdge = 768): Promise<void> {
@@ -80,42 +89,104 @@ export class DepthEditor {
     this.h = Math.max(1, Math.round(d.height * scale));
     this.rawDepth = toGray(d, this.w, this.h);
     this.matte = toGray(m, this.w, this.h);
-    this.adjusted = new Float32Array(this.w * this.h);
-    this.apply(DEFAULT_ADJUST);
+    this.focus = new Float32Array(this.w * this.h);
+    this.edited = new Float32Array(this.w * this.h);
+    this.anchors = {};
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.recompute();
   }
 
-  /** Recompute the adjusted depth from the raw map + settings. */
-  apply(a: DepthAdjust): void {
-    const n = this.w * this.h;
-    const span = Math.max(a.white - a.black, 1e-3);
-    const cf = 1 + a.contrast * 2.5; // contrast steepness
-    const tmp = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      let d = (this.rawDepth[i] - a.black) / span; // levels / expander
-      d = d < 0 ? 0 : d > 1 ? 1 : d;
-      d = 0.5 + (d - 0.5) * cf; // contrast around mid
-      tmp[i] = d < 0 ? 0 : d > 1 ? 1 : d;
-    }
-    if (a.smoothing > 0.001) {
-      const r = Math.max(1, Math.round(a.smoothing * Math.max(this.w, this.h) * 0.06));
-      const blurred = boxBlur(tmp, this.w, this.h, r);
-      for (let i = 0; i < n; i++) {
-        const bg = 1 - this.matte[i]; // smooth only the background; keep the subject crisp
-        this.adjusted[i] = tmp[i] * (1 - bg * a.smoothing) + blurred[i] * (bg * a.smoothing);
+  sampleRaw(nx: number, ny: number): number {
+    const x = clampIdx(Math.round(nx * (this.w - 1)), 0, this.w - 1);
+    const y = clampIdx(Math.round(ny * (this.h - 1)), 0, this.h - 1);
+    return this.rawDepth[y * this.w + x];
+  }
+
+  setAnchor(name: AnchorName, nx: number, ny: number): void {
+    this.anchors[name] = this.sampleRaw(nx, ny);
+    this.recompute();
+  }
+  setSettings(s: DepthSettings): void {
+    this.settings = s;
+    this.recompute();
+  }
+
+  /** Anchor depths, filling in sensible defaults from the raw map + matte. */
+  private resolvedAnchors(): { s: number; f: number; m: number; b: number } {
+    let subjSum = 0;
+    let subjN = 0;
+    let mn = 1;
+    let mx = 0;
+    for (let i = 0; i < this.w * this.h; i++) {
+      const d = this.rawDepth[i];
+      if (d < mn) mn = d;
+      if (d > mx) mx = d;
+      if (this.matte[i] > 0.5) {
+        subjSum += d;
+        subjN++;
       }
-    } else {
-      this.adjusted.set(tmp);
+    }
+    const autoS = subjN > 0 ? subjSum / subjN : (mn + mx) / 2;
+    let s = this.anchors.subject ?? autoS;
+    let f = this.anchors.foreground ?? mx; // nearest
+    let b = this.anchors.background ?? mn; // farthest
+    let m = this.anchors.midground ?? (s + b) / 2;
+    // keep the ordering sane: background ≤ midground ≤ subject ≤ foreground
+    f = Math.max(f, s + 1e-3);
+    b = Math.min(b, s - 1e-3);
+    m = clamp01(Math.min(Math.max(m, b + 1e-3), s - 1e-3));
+    return { s, f, m, b };
+  }
+
+  private recompute(): void {
+    const n = this.w * this.h;
+    const { s, f, m, b } = this.resolvedAnchors();
+    const sep = 1 + this.settings.separation * 2.2;
+
+    for (let i = 0; i < n; i++) {
+      const d = this.rawDepth[i];
+      // background focus from depth distance to the subject plane (front & back both fall to 0)
+      let bgf: number;
+      if (d >= s) {
+        bgf = 1 - (d - s) / Math.max(f - s, 1e-3); // in front of subject
+      } else if (d >= m) {
+        bgf = 1 - 0.5 * ((s - d) / Math.max(s - m, 1e-3)); // subject → midground (0.5)
+      } else {
+        bgf = 0.5 - 0.5 * ((m - d) / Math.max(m - b, 1e-3)); // midground → background (0)
+      }
+      bgf = clamp01(bgf);
+      // the SUBJECT (matte) is always in focus (white); the rest uses the depth falloff
+      const mt = this.matte[i];
+      let fo = clamp01(mt + (1 - mt) * bgf);
+      fo = clamp01(0.5 + (fo - 0.5) * sep); // separation steepens the split
+      this.focus[i] = fo;
+      // edited depth centered on the subject, keeping near/far sign for occlusion
+      const blur = 1 - fo;
+      this.edited[i] = d >= s ? 0.5 + 0.5 * blur : 0.5 - 0.5 * blur;
+    }
+
+    // smooth only the background gradient (keep the subject crisp)
+    if (this.settings.smoothing > 0.001) {
+      const r = Math.max(1, Math.round(this.settings.smoothing * Math.max(this.w, this.h) * 0.06));
+      const be = boxBlur(this.edited, this.w, this.h, r);
+      const bf = boxBlur(this.focus, this.w, this.h, r);
+      const a = this.settings.smoothing;
+      for (let i = 0; i < n; i++) {
+        const bg = 1 - this.matte[i];
+        this.edited[i] = this.edited[i] * (1 - bg * a) + be[i] * (bg * a);
+        this.focus[i] = this.focus[i] * (1 - bg * a) + bf[i] * (bg * a);
+      }
     }
   }
 
-  /** Paint the current adjusted depth (grayscale) into a canvas. */
-  drawTo(canvas: HTMLCanvasElement): void {
+  /** Paint the focus map (white = in focus) for the Depth view. */
+  drawFocus(canvas: HTMLCanvasElement): void {
     canvas.width = this.w;
     canvas.height = this.h;
     const ctx = canvas.getContext("2d")!;
     const img = ctx.createImageData(this.w, this.h);
     for (let i = 0; i < this.w * this.h; i++) {
-      const v = (this.adjusted[i] * 255 + 0.5) | 0;
+      const v = (this.focus[i] * 255 + 0.5) | 0;
       img.data[i * 4] = v;
       img.data[i * 4 + 1] = v;
       img.data[i * 4 + 2] = v;
@@ -124,16 +195,20 @@ export class DepthEditor {
     ctx.putImageData(img, 0, 0);
   }
 
-  /** Read the adjusted depth value (0..1) at normalized coords — for tap-to-focus / anchors. */
-  sampleAt(nx: number, ny: number): number {
-    const x = clampIdx(Math.round(nx * (this.w - 1)), 0, this.w - 1);
-    const y = clampIdx(Math.round(ny * (this.h - 1)), 0, this.h - 1);
-    return this.adjusted[y * this.w + x];
-  }
-
-  async exportPng(): Promise<Blob> {
+  async exportDepthPng(): Promise<Blob> {
     const c = document.createElement("canvas");
-    this.drawTo(c);
+    c.width = this.w;
+    c.height = this.h;
+    const ctx = c.getContext("2d")!;
+    const img = ctx.createImageData(this.w, this.h);
+    for (let i = 0; i < this.w * this.h; i++) {
+      const v = (this.edited[i] * 255 + 0.5) | 0;
+      img.data[i * 4] = v;
+      img.data[i * 4 + 1] = v;
+      img.data[i * 4 + 2] = v;
+      img.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
     return await new Promise<Blob>((resolve) => c.toBlob((b) => resolve(b!), "image/png"));
   }
 }

@@ -1,5 +1,5 @@
-// Lensy front-end entry. Flow: upload → Generate depth map → edit the depth map live →
-// Render → before/after → Save. Rendering/state logic lives in api.ts, depth.ts, controls.ts.
+// Lensy front-end. Flow: upload → Generate depth map → place anchors + tune the focus map live
+// (Depth tab) → Render (Lens/Export) → before/after → Save. Tabs keep the image visible.
 
 import "./styles/main.css";
 import { registerSW } from "virtual:pwa-register";
@@ -13,7 +13,7 @@ import {
   type RenderHandle,
 } from "./api";
 import { Controls } from "./controls";
-import { DEFAULT_ADJUST, DepthEditor, type DepthAdjust } from "./depth";
+import { type AnchorName, DEFAULT_SETTINGS, DepthEditor, type DepthSettings } from "./depth";
 import { setupServerPanel } from "./server";
 
 registerSW({ immediate: true });
@@ -26,13 +26,15 @@ const stage = $("stage");
 const generateBtn = $("generate") as HTMLButtonElement;
 const renderBtn = $("render") as HTMLButtonElement;
 const resetBtn = $("reset") as HTMLButtonElement;
+const resetDepthBtn = $("reset-depth") as HTMLButtonElement;
 const saveBtn = $("save") as HTMLButtonElement;
 const progress = $("progress");
 const progressFill = $("progress-fill");
 const progressLabel = $("progress-label");
 const progressPct = $("progress-pct");
 const focusRing = $("focus-ring");
-const depthControls = $("depth-controls");
+const depthTools = $("depth-tools");
+const anchorHint = $("anchor-hint");
 
 let currentFile: File | null = null;
 let originalUrl: string | null = null;
@@ -40,40 +42,15 @@ let resultUrl: string | null = null;
 let resultBlob: Blob | null = null;
 let analyzeId: string | null = null;
 let inflight: RenderHandle | null = null;
-let view: "photo" | "depth" = "photo";
+let view: "photo" | "depth" = "depth";
+let armed: AnchorName | null = null;
 
 const editor = new DepthEditor();
 const depthCanvas = document.createElement("canvas");
 depthCanvas.className = "stage-img";
 
 const controls = new Controls(() => {});
-
-// --- depth adjustment sliders ---
-const adjust: DepthAdjust = { ...DEFAULT_ADJUST };
-const depthSliders = {
-  black: $("d-black") as HTMLInputElement,
-  white: $("d-white") as HTMLInputElement,
-  contrast: $("d-contrast") as HTMLInputElement,
-  smoothing: $("d-smooth") as HTMLInputElement,
-};
-function readAdjust(): void {
-  adjust.black = Number(depthSliders.black.value) / 100;
-  adjust.white = Number(depthSliders.white.value) / 100;
-  adjust.contrast = Number(depthSliders.contrast.value) / 100;
-  adjust.smoothing = Number(depthSliders.smoothing.value) / 100;
-  $("d-black-val").textContent = adjust.black.toFixed(2);
-  $("d-white-val").textContent = adjust.white.toFixed(2);
-  $("d-contrast-val").textContent = adjust.contrast.toFixed(2);
-  $("d-smooth-val").textContent = adjust.smoothing.toFixed(2);
-}
-Object.values(depthSliders).forEach((s) =>
-  s.addEventListener("input", () => {
-    if (!editor.ready) return;
-    readAdjust();
-    editor.apply(adjust);
-    if (view === "depth") editor.drawTo(depthCanvas);
-  }),
-);
+const settings: DepthSettings = { ...DEFAULT_SETTINGS };
 
 // --- toast ---
 let toastTimer: number | undefined;
@@ -82,8 +59,21 @@ function toast(message: string): void {
   el.textContent = message;
   el.classList.add("show");
   window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => el.classList.remove("show"), 4500);
+  toastTimer = window.setTimeout(() => el.classList.remove("show"), 4000);
 }
+
+// --- tabs ---
+document.querySelectorAll<HTMLButtonElement>(".tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const name = tab.dataset.tab!;
+    document.querySelectorAll<HTMLButtonElement>(".tab").forEach((t) =>
+      t.setAttribute("aria-selected", String(t === tab)),
+    );
+    document.querySelectorAll<HTMLElement>(".tabpanel").forEach((p) =>
+      p.classList.toggle("hidden", p.dataset.panel !== name),
+    );
+  });
+});
 
 // --- stage content ---
 function showPhoto(): void {
@@ -93,16 +83,19 @@ function showPhoto(): void {
   img.src = originalUrl;
   img.className = "stage-img";
   img.alt = "Your photo";
-  img.addEventListener("click", onFocusTap);
+  img.addEventListener("click", onStageTap);
   stage.appendChild(img);
   stage.appendChild(focusRing);
 }
 function showDepth(): void {
-  editor.drawTo(depthCanvas);
+  editor.drawFocus(depthCanvas);
   stage.innerHTML = "";
-  depthCanvas.addEventListener("click", onFocusTap);
+  depthCanvas.onclick = onStageTap;
   stage.appendChild(depthCanvas);
   stage.appendChild(focusRing);
+}
+function refreshDepthView(): void {
+  if (view === "depth" && editor.ready) editor.drawFocus(depthCanvas);
 }
 function setView(v: "photo" | "depth"): void {
   view = v;
@@ -113,21 +106,57 @@ function setView(v: "photo" | "depth"): void {
   else showPhoto();
 }
 
-// tap-to-focus: sample the depth at the tapped point (falls back to a vertical guess)
-function onFocusTap(e: MouseEvent): void {
+// --- anchors ---
+function setArmed(name: AnchorName | null): void {
+  armed = name;
+  document.querySelectorAll<HTMLButtonElement>("#anchors button").forEach((b) =>
+    b.classList.toggle("armed", b.dataset.anchor === name),
+  );
+  anchorHint.textContent = name ? `tap to place ${name}` : "pick one";
+}
+document.querySelectorAll<HTMLButtonElement>("#anchors button").forEach((b) => {
+  b.addEventListener("click", () => setArmed(armed === b.dataset.anchor ? null : (b.dataset.anchor as AnchorName)));
+});
+
+function onStageTap(e: MouseEvent): void {
+  if (!editor.ready) return;
   const el = e.currentTarget as HTMLElement;
   const rect = el.getBoundingClientRect();
   const nx = (e.clientX - rect.left) / rect.width;
   const ny = (e.clientY - rect.top) / rect.height;
-  const focus = editor.ready ? editor.sampleAt(nx, ny) : 1 - ny * 0.85;
-  controls.setFocus(focus);
+  const name: AnchorName = armed ?? "subject"; // a plain tap sets the Subject (focus) point
+  editor.setAnchor(name, nx, ny);
+  document
+    .querySelector<HTMLButtonElement>(`#anchors button[data-anchor="${name}"]`)
+    ?.classList.add("set");
+  refreshDepthView();
+  // focus-ring feedback
   focusRing.style.left = `${e.clientX - rect.left}px`;
   focusRing.style.top = `${e.clientY - rect.top}px`;
   focusRing.classList.remove("show");
   void focusRing.offsetWidth;
   focusRing.classList.add("show");
-  toast(`Focus set at depth ${focus.toFixed(2)}`);
+  toast(`${name} anchor set`);
+  setArmed(null);
 }
+
+// --- depth sliders ---
+const sepSlider = $("d-sep") as HTMLInputElement;
+const smoothSlider = $("d-smooth") as HTMLInputElement;
+function readSettings(): void {
+  settings.separation = Number(sepSlider.value) / 100;
+  settings.smoothing = Number(smoothSlider.value) / 100;
+  $("d-sep-val").textContent = settings.separation.toFixed(2);
+  $("d-smooth-val").textContent = settings.smoothing.toFixed(2);
+}
+[sepSlider, smoothSlider].forEach((s) =>
+  s.addEventListener("input", () => {
+    if (!editor.ready) return;
+    readSettings();
+    editor.setSettings({ ...settings });
+    refreshDepthView();
+  }),
+);
 
 // --- before/after compare ---
 function showCompare(beforeUrl: string, afterUrl: string): void {
@@ -144,8 +173,7 @@ function showCompare(beforeUrl: string, afterUrl: string): void {
   const handle = wrap.querySelector<HTMLDivElement>(".handle")!;
   const setSplit = (clientX: number) => {
     const rect = wrap.getBoundingClientRect();
-    const pct = Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100));
-    wrap.style.setProperty("--split", `${pct}%`);
+    wrap.style.setProperty("--split", `${Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100))}%`);
   };
   wrap.style.setProperty("--split", "50%");
   let dragging = false;
@@ -168,23 +196,14 @@ function acceptFile(file: File): void {
   if (originalUrl) URL.revokeObjectURL(originalUrl);
   originalUrl = URL.createObjectURL(file);
   analyzeId = null;
-  resetDepthUI();
+  depthTools.classList.add("hidden");
+  view = "photo";
   showPhoto();
-  generateBtn.disabled = false;
   generateBtn.classList.remove("hidden");
-  resetBtn.disabled = false;
+  generateBtn.disabled = false;
   renderBtn.classList.add("hidden");
   saveBtn.classList.add("hidden");
-}
-
-function resetDepthUI(): void {
-  depthControls.classList.add("hidden");
-  depthSliders.black.value = "0";
-  depthSliders.white.value = "100";
-  depthSliders.contrast.value = "0";
-  depthSliders.smoothing.value = "0";
-  readAdjust();
-  view = "photo";
+  resetBtn.disabled = false;
 }
 
 // --- generate depth map ---
@@ -192,19 +211,19 @@ async function doGenerate(): Promise<void> {
   if (!currentFile) return;
   generateBtn.disabled = true;
   setProgress(0.1, "Analyzing…");
-  progress.classList.remove("hidden");
   try {
     const { analyzeId: aid } = await analyze(currentFile);
     analyzeId = aid;
     await editor.load(depthUrl(aid), matteUrl(aid));
-    readAdjust();
-    editor.apply(adjust);
+    readSettings();
+    editor.setSettings({ ...settings });
     progress.classList.add("hidden");
-    depthControls.classList.remove("hidden");
+    depthTools.classList.remove("hidden");
     generateBtn.classList.add("hidden");
     renderBtn.classList.remove("hidden");
-    setView("depth"); // show them the depth map they can now edit
-    toast("Depth map ready — edit it, then Render.");
+    document.querySelectorAll<HTMLButtonElement>("#anchors button").forEach((b) => b.classList.remove("set"));
+    setView("depth");
+    toast("Depth map ready — place anchors, tune, then Render.");
   } catch (err) {
     progress.classList.add("hidden");
     generateBtn.disabled = false;
@@ -226,13 +245,11 @@ async function doRender(): Promise<void> {
   saveBtn.classList.add("hidden");
   setProgress(0.02, "Sending…");
   inflight?.cancel();
-
   try {
     if (analyzeId && editor.ready) {
-      const depthPng = await editor.exportPng();
-      inflight = renderFromAnalyze(analyzeId, depthPng, controls.params(), (p) =>
-        setProgress(p.progress, p.label),
-      );
+      const depthPng = await editor.exportDepthPng();
+      const params = { ...controls.params(), disp_focus: editor.focalValue, autofocus: false };
+      inflight = renderFromAnalyze(analyzeId, depthPng, params, (p) => setProgress(p.progress, p.label));
     } else {
       inflight = render(currentFile, controls.params(), (p) => setProgress(p.progress, p.label));
     }
@@ -243,6 +260,8 @@ async function doRender(): Promise<void> {
     showCompare(originalUrl, url);
     progress.classList.add("hidden");
     saveBtn.classList.remove("hidden");
+    $("export-empty").classList.add("hidden");
+    toast("Rendered. Save it from the Export tab.");
   } catch (err) {
     progress.classList.add("hidden");
     toast(err instanceof ApiError ? err.message : "Something went wrong rendering.");
@@ -252,21 +271,34 @@ async function doRender(): Promise<void> {
   }
 }
 
-function reset(): void {
+function resetDepth(): void {
+  editor.anchors = {};
+  sepSlider.value = "0";
+  smoothSlider.value = "0";
+  readSettings();
+  editor.setSettings({ ...settings });
+  document.querySelectorAll<HTMLButtonElement>("#anchors button").forEach((b) => b.classList.remove("set"));
+  setArmed(null);
+  refreshDepthView();
+}
+
+function resetAll(): void {
   inflight?.cancel();
   controls.reset();
-  resetDepthUI();
+  resetDepth();
   if (originalUrl) {
+    view = "photo";
     showPhoto();
     renderBtn.classList.add("hidden");
     generateBtn.classList.remove("hidden");
     generateBtn.disabled = false;
+    depthTools.classList.add("hidden");
   }
   progress.classList.add("hidden");
   saveBtn.classList.add("hidden");
 }
 
-// --- save to phone (Web Share → Save to Photos; falls back to download) ---
+// --- save to phone (Web Share → Save to Photos; download fallback) ---
 async function save(): Promise<void> {
   if (!resultBlob) return;
   const file = new File([resultBlob], "lensy.jpg", { type: "image/jpeg" });
@@ -276,7 +308,7 @@ async function save(): Promise<void> {
       await nav.share({ files: [file], title: "Lensy" });
       return;
     } catch {
-      /* user cancelled or share failed → fall through to download */
+      /* cancelled → download */
     }
   }
   const a = document.createElement("a");
@@ -320,7 +352,8 @@ $("view")
 
 generateBtn.addEventListener("click", doGenerate);
 renderBtn.addEventListener("click", doRender);
-resetBtn.addEventListener("click", reset);
+resetBtn.addEventListener("click", resetAll);
+resetDepthBtn.addEventListener("click", resetDepth);
 saveBtn.addEventListener("click", save);
 
 setupServerPanel();
