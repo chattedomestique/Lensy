@@ -113,19 +113,25 @@ export function render(
       }
     });
 
-    // poll the result until it's ready (200), errored (500), or we time out
-    const deadline = Date.now() + 5 * 60 * 1000;
+    // poll the result until it's ready (200), the server reports a real error, or we time out.
+    // 409 = still rendering; 502/503/504 + network blips = transient tunnel hiccups → keep polling
+    // (a gateway blip during a 90s render must not fail it). Only a real 5xx/4xx from the app fails.
+    const deadline = Date.now() + 6 * 60 * 1000;
+    const wait = () => new Promise((res) => setTimeout(res, 1500));
     try {
       while (!cancelled) {
         if (serverError) throw new ApiError(serverError);
-        const r = await fetch(apiUrl(resultPath));
-        if (r.status === 200) {
-          return URL.createObjectURL(await r.blob());
+        if (Date.now() > deadline) throw new ApiError("render timed out");
+        let r: Response;
+        try {
+          r = await fetch(apiUrl(resultPath), { cache: "no-store" });
+        } catch {
+          await wait(); // network hiccup — retry
+          continue;
         }
-        if (r.status === 409) {
-          // still rendering — wait and retry
-          if (Date.now() > deadline) throw new ApiError("render timed out");
-          await new Promise((res) => setTimeout(res, 1500));
+        if (r.status === 200) return URL.createObjectURL(await r.blob());
+        if (r.status === 409 || r.status === 502 || r.status === 503 || r.status === 504) {
+          await wait(); // still rendering, or transient gateway error — retry
           continue;
         }
         const body = await r.json().catch(() => ({}));
