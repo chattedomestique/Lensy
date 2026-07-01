@@ -139,36 +139,56 @@ def _field(h: int, w: int):
     return (np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / halfdiag).astype(np.float32), cx, cy
 
 
-def _add_sweet_spot(radius_px: np.ndarray, p: BlurParams) -> np.ndarray:
-    """Lensbaby: a sharp central 'sweet spot', blur growing radially outward beyond it. Added to
-    the depth CoC in quadrature, so depth focus and the field blur combine like a real lens."""
-    h, w = radius_px.shape
-    r_frac, _, _ = _field(h, w)
-    max_r = max(1.0, (p.k / 100.0) * float(np.hypot(h, w)) * 0.11)
-    t = np.clip((r_frac - p.sweet_size) / max(1.0 - p.sweet_size, 1e-3), 0.0, 1.0)
-    sweet_r = p.sweet * max_r * (t * t * (3.0 - 2.0 * t))  # smoothstep growth
-    return np.sqrt(radius_px * radius_px + sweet_r * sweet_r).astype(np.float32)
-
-
 def _apply_swirl(img: np.ndarray, strength: float) -> np.ndarray:
     """Petzval: optical-vignetting swirl approximated as a tangential (spin) blur whose angle grows
-    with field radius — off-axis bokeh streaks tangentially, curling around the sharp center."""
+    with field radius — off-axis bokeh streaks tangentially, curling around the sharp center.
+    Uses many gaussian-weighted samples so the streak is a smooth arc (no discrete ghost repeats)."""
     if strength <= 0:
         return img
     h, w = img.shape[:2]
     r_frac, cx, cy = _field(h, w)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     dx, dy = xx - cx, yy - cy
-    max_ang = 0.5 * float(strength)  # radians at the corner
+    max_ang = 0.38 * float(strength)  # radians at the corner
+    n = 21
+    offs = np.linspace(-1.0, 1.0, n)
+    wts = np.exp(-((offs * 1.6) ** 2))  # gaussian taper → smooth streak, not stacked copies
+    wts = wts / wts.sum()
     acc = np.zeros_like(img)
-    n = 9
-    for off in np.linspace(-1.0, 1.0, n):
-        ang = (off * max_ang) * (r_frac ** 1.6)  # per-pixel rotation, stronger toward edges
+    for off, wt in zip(offs, wts):
+        ang = (off * max_ang) * (r_frac ** 1.5)  # per-pixel rotation, stronger toward edges
         c, s = np.cos(ang), np.sin(ang)
         srcx = np.ascontiguousarray(cx + dx * c - dy * s, dtype=np.float32)
         srcy = np.ascontiguousarray(cy + dx * s + dy * c, dtype=np.float32)
-        acc += cv2.remap(img, srcx, srcy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    return (acc / n).astype(np.float32)
+        acc += float(wt) * cv2.remap(img, srcx, srcy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return acc.astype(np.float32)
+
+
+def _apply_sweet_overlay(img_lin: np.ndarray, p: BlurParams) -> np.ndarray:
+    """Lensbaby: a sharp central 'sweet spot' with blur growing radially outward — applied to the
+    FINAL composite (on top of everything), so anything outside the spot softens, subject included.
+    A smooth multi-level gaussian blend keeps the falloff dreamy and gradual."""
+    if p.sweet <= 0:
+        return img_lin
+    h, w = img_lin.shape[:2]
+    r_frac, _, _ = _field(h, w)
+    t = np.clip((r_frac - p.sweet_size) / max(1.0 - p.sweet_size, 1e-3), 0.0, 1.0)
+    amt = (t * t * (3.0 - 2.0 * t)) * float(p.sweet)  # 0 in the spot → sweet at the corners
+    max_sig = max(1.0, (p.k / 100.0) * float(np.hypot(h, w)) * 0.05)
+    levels = [
+        img_lin,
+        cv2.GaussianBlur(img_lin, (0, 0), sigmaX=max_sig * 0.35),
+        cv2.GaussianBlur(img_lin, (0, 0), sigmaX=max_sig * 0.7),
+        cv2.GaussianBlur(img_lin, (0, 0), sigmaX=max_sig),
+    ]
+    idx = amt * (len(levels) - 1)
+    lo = np.clip(np.floor(idx).astype(np.int32), 0, len(levels) - 2)
+    frac = (idx - lo)[..., None]
+    out = np.array(levels[0])
+    for k in range(len(levels) - 1):
+        m = (lo == k)[..., None]
+        out = np.where(m, levels[k] * (1.0 - frac) + levels[k + 1] * frac, out)
+    return out.astype(np.float32)
 
 
 def render_layered_dof(
@@ -187,15 +207,16 @@ def render_layered_dof(
     # --- background sheet (opaque, complete via inpaint) ---
     bg_lin = srgb_to_linear(clean_bg_u8.astype(np.float32) / 255.0)
     bg_radius = focal_radius(bg_signal, focus, metric, p)
-    if p.sweet > 0:  # Lensbaby sweet spot — extra radial blur outside the sharp center
-        bg_radius = _add_sweet_spot(bg_radius, p)
     bg_coord = _layer_coord(bg_signal, metric)
     excess = np.clip(bg_lin - _HI_THRESH, 0.0, None) if p.highlight_boost > 0 else None
     bgc, bga, bgbloom = render_sheet(bg_lin, np.ones((h, w), np.float32), bg_coord, bg_radius, p, excess)
     bg_rendered = bgc / np.clip(bga, 1e-4, None)  # un-premultiply the opaque plate
     if excess is not None:
         bg_rendered = bg_rendered + (p.highlight_boost * 2.0) * bgbloom
-    if p.swirl > 0:  # Petzval swirl — tangential smear of the background, subject stays sharp
+    if p.swirl > 0:  # Petzval swirl — tangential smear of the background, subject stays sharp.
+        # a touch of smoothing first blends the discrete depth-slice steps so they don't streak
+        # into visible bands under the swirl.
+        bg_rendered = cv2.GaussianBlur(bg_rendered, (0, 0), sigmaX=1.4)
         bg_rendered = _apply_swirl(bg_rendered, p.swirl)
 
     # --- foreground sheet (subject) ---
@@ -212,5 +233,7 @@ def render_layered_dof(
 
     # --- compose foreground OVER background (premultiplied) ---
     out_lin = fgc + bg_rendered * (1.0 - fga)
+    # Lensbaby sweet spot goes on TOP of everything (subject included) — a field-radius blur
+    out_lin = _apply_sweet_overlay(out_lin, p)
     out_lin = tonemap_highlights(out_lin)
     return (np.clip(linear_to_srgb(out_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
