@@ -32,6 +32,31 @@ def estimate_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
     return _radial_disparity(rgb_u8)
 
 
+def _sigma(disp: np.ndarray) -> float:
+    h, w = disp.shape[:2]
+    return max(2.0, min(h, w) / 130.0)  # ~12px at 1536
+
+
+def smooth_depth(disp: np.ndarray) -> np.ndarray:
+    """Plain Gaussian smoothing so the DoF grades cleanly rather than blotching from per-pixel
+    model noise. NOT edge-aware on purpose — locking depth to image texture (tattoos, patterns)
+    would create false depth steps → sharp/blur seams. Used for the SUBJECT's depth."""
+    return np.clip(cv2.GaussianBlur(disp.astype(np.float32), (0, 0), sigmaX=_sigma(disp)), 0.0, 1.0)
+
+
+def background_depth(disp: np.ndarray, subject_mask: np.ndarray) -> np.ndarray:
+    """Depth field for the BACKGROUND: fill the subject's region with surrounding background
+    depth (so the subject's near-depth can't bleed outward and leave a sharp bright ring around
+    the silhouette), then smooth. This keeps the true depth discontinuity AT the silhouette."""
+    h, w = disp.shape[:2]
+    grow = max(3, (min(h, w) // 120) | 1)
+    hole = cv2.dilate((subject_mask > 0).astype(np.uint8) * 255,
+                      cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
+    d8 = (np.clip(disp, 0, 1) * 255).astype(np.uint8)
+    filled = cv2.inpaint(d8, hole, max(3, grow), cv2.INPAINT_TELEA).astype(np.float32) / 255.0
+    return np.clip(cv2.GaussianBlur(filled, (0, 0), sigmaX=_sigma(disp)), 0.0, 1.0)
+
+
 def _normalize(d: np.ndarray) -> np.ndarray:
     d = d.astype(np.float32)
     lo, hi = float(np.percentile(d, 1)), float(np.percentile(d, 99))

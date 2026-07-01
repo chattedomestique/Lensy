@@ -35,6 +35,7 @@ class BlurParams:
     highlight_boost: float = 0.18  # localized bloom strength for true highlights (0 = off)
     cat_eye: float = 0.2       # optical vignetting toward edges (0 = off)
     n_bins: int = 10           # CoC quantization layers (smoother gradient)
+    focus_range: float = 0.12  # half-width (in normalized disparity) of the in-focus DoF zone
 
 
 # ---- aperture kernels ---------------------------------------------------------------
@@ -92,33 +93,43 @@ def _apply_cat_eye(kernel: np.ndarray, fx: float, fy: float, strength: float) ->
     return out / s if s > 0 else kernel
 
 
-# ---- main renderer ------------------------------------------------------------------
+# ---- depth → circle-of-confusion, and the shared scatter core -----------------------
+
+_HI_THRESH = 0.82  # linear luminance above which highlights bloom
 
 
-def render_lens_blur(bg_u8: np.ndarray, disparity: np.ndarray, p: BlurParams) -> np.ndarray:
-    """Blur the clean background plate. Returns uint8 RGB (HxWx3), still in sRGB."""
-    h, w = bg_u8.shape[:2]
+def radius_from_disparity(disparity: np.ndarray, p: BlurParams) -> np.ndarray:
+    """Per-pixel blur radius (px) = |signed CoC|. Zero at the focal plane, growing with distance
+    from it in either direction. This is the single depth-of-field field used for BOTH the
+    background and the subject, so the whole scene grades continuously with depth."""
+    h, w = disparity.shape[:2]
     diag = float(np.hypot(h, w))
     max_radius = max(1.0, (p.k / 100.0) * diag * 0.045)  # K=100 ≈ 4.5% of diagonal
-
-    # signed CoC; magnitude is the blur radius in px
-    coc = disparity.astype(np.float32) - float(p.disp_focus)
     norm = max(float(p.disp_focus), 1.0 - float(p.disp_focus), 1e-3)
-    radius_px = np.clip(np.abs(coc) / norm, 0.0, 1.0) * max_radius
+    # in-focus dead zone: everything within focus_range of the focal plane stays perfectly sharp
+    # (a real lens keeps a slab of depth in focus). This is what stops in-focus edges from
+    # spreading a faint rim, while things beyond the zone still grade continuously.
+    coc = np.abs(disparity.astype(np.float32) - float(p.disp_focus))
+    coc = np.clip(coc - float(p.focus_range), 0.0, None) / norm
+    return np.clip(coc, 0.0, 1.0) * max_radius
 
-    bg_lin = srgb_to_linear(bg_u8.astype(np.float32) / 255.0)
 
-    # Bloom source: ONLY the energy above a high threshold (true highlights) glows. Dark and mid
-    # tones contribute nothing, so the blur never lifts blacks or hazes the frame. The excess is
-    # spread with the same depth-of-field as the blur and added back on top (localized, additive)
-    # — not a global multiplicative boost, which is what caused the old wash.
-    HI_THRESH = 0.82
-    excess = np.clip(bg_lin - HI_THRESH, 0.0, None)
-    do_bloom = p.highlight_boost > 0.0
+def scatter_dof(
+    color_lin: np.ndarray,      # linear RGB (HxWx3), NOT premultiplied
+    weight: np.ndarray,         # opacity per pixel (HxWx1); ones for an opaque plate, alpha for a cutout
+    radius_px: np.ndarray,      # per-pixel blur radius
+    p: BlurParams,
+    bloom_excess: np.ndarray | None = None,
+):
+    """Energy-conserving, aperture-shaped scatter, quantized into CoC bins and composited
+    far→near. Returns (premultiplied_color, coverage, bloom). Works for any layer — the
+    background (weight=1) or a soft-alpha subject (weight=α) — so the same optics apply to both."""
+    h, w = radius_px.shape
+    premult = color_lin * weight  # premultiplied so soft edges blend without fringing
+    max_r = float(radius_px.max())
+    edges = np.linspace(0.0, max(max_r, 1e-3), int(p.n_bins) + 1)
 
-    # quantize CoC into bins, composite far→near (largest radius first)
-    edges = np.linspace(0.0, max_radius, int(p.n_bins) + 1)
-    out_c = np.zeros((h, w, 3), np.float32)  # premultiplied accumulated color
+    out_c = np.zeros((h, w, 3), np.float32)
     out_w = np.zeros((h, w, 1), np.float32)
     bloom = np.zeros((h, w, 3), np.float32)
 
@@ -126,37 +137,59 @@ def render_lens_blur(bg_u8: np.ndarray, disparity: np.ndarray, p: BlurParams) ->
         r_lo, r_hi = edges[i - 1], edges[i]
         r_mid = 0.5 * (r_lo + r_hi)
         if r_mid < 0.75:
-            # near-focus layer: effectively sharp, handled by the sharp pass below
-            continue
+            continue  # near-focus layer handled by the sharp pass below
         member = ((radius_px >= r_lo) & (radius_px < r_hi)).astype(np.float32)
         if member.sum() < 1.0:
             continue
         kernel = _aperture_kernel(int(round(r_mid)), p)
         if p.cat_eye > 0:
-            # representative frame position = mean location of this bin's pixels
             ys, xs = np.where(member > 0)
             fx = (xs.mean() / w) * 2 - 1
             fy = (ys.mean() / h) * 2 - 1
             kernel = _apply_cat_eye(kernel, float(fx), float(fy), p.cat_eye)
 
         m3 = member[..., None]
-        # energy-conserving scatter: color and weight spread together (kernel sums to 1)
-        spread_c = cv2.filter2D(bg_lin * m3, -1, kernel, borderType=cv2.BORDER_REPLICATE)
-        spread_w = cv2.filter2D(member, -1, kernel, borderType=cv2.BORDER_REPLICATE)[..., None]
+        spread_c = cv2.filter2D(premult * m3, -1, kernel, borderType=cv2.BORDER_REPLICATE)
+        # filter2D collapses a (H,W,1) input to (H,W) — restore the channel axis
+        spread_w = cv2.filter2D(weight * m3, -1, kernel, borderType=cv2.BORDER_REPLICATE)[..., None]
         cov = np.clip(spread_w, 0.0, 1.0)
         out_c = spread_c + out_c * (1.0 - cov)  # premultiplied OVER
         out_w = spread_w + out_w * (1.0 - cov)
-        if do_bloom:
-            bloom += cv2.filter2D(excess * m3, -1, kernel, borderType=cv2.BORDER_REPLICATE)
+        if bloom_excess is not None:
+            bloom += cv2.filter2D(bloom_excess * m3, -1, kernel, borderType=cv2.BORDER_REPLICATE)
 
-    # sharp (in-focus) pixels: composite the original linear bg under everything
-    sharp_w = np.clip(1.0 - out_w, 0.0, 1.0)
-    out_c = out_c + bg_lin * sharp_w
-    out_w = out_w + sharp_w
+    sharp = (radius_px < 0.75)[..., None].astype(np.float32)
+    out_c = out_c + premult * sharp
+    out_w = out_w + weight * sharp
+    return out_c, out_w, bloom
+
+
+# ---- background + foreground renderers ----------------------------------------------
+
+
+def render_lens_blur(bg_u8: np.ndarray, disparity: np.ndarray, p: BlurParams) -> np.ndarray:
+    """Blur the clean (inpainted) background plate by depth. Returns uint8 sRGB."""
+    h, w = bg_u8.shape[:2]
+    bg_lin = srgb_to_linear(bg_u8.astype(np.float32) / 255.0)
+    radius_px = radius_from_disparity(disparity, p)
+    excess = np.clip(bg_lin - _HI_THRESH, 0.0, None) if p.highlight_boost > 0 else None
+
+    out_c, out_w, bloom = scatter_dof(bg_lin, np.ones((h, w, 1), np.float32), radius_px, p, excess)
     result_lin = out_c / np.clip(out_w, 1e-4, None)
-
-    if do_bloom:  # additive glow, localized to bright out-of-focus areas only
+    if excess is not None:  # additive glow, only on bright out-of-focus areas
         result_lin = result_lin + (p.highlight_boost * 2.0) * bloom
-
-    result_lin = tonemap_highlights(result_lin)  # roll only true highlights toward white
+    result_lin = tonemap_highlights(result_lin)
     return (np.clip(linear_to_srgb(result_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+def blur_foreground_dof(
+    fg_srgb: np.ndarray, alpha: np.ndarray, disparity: np.ndarray, p: BlurParams
+):
+    """Apply the SAME depth-of-field to the subject: parts of it off the focal plane blur, the
+    focal parts stay sharp — so the person isn't a flat sticker. Returns (premultiplied linear
+    color, blurred coverage α) for premultiplied compositing over the blurred background."""
+    fg_lin = srgb_to_linear(np.clip(fg_srgb, 0.0, 1.0))
+    a = np.clip(alpha, 0.0, 1.0)[..., None].astype(np.float32)
+    radius_px = radius_from_disparity(disparity, p)
+    out_c, out_w, _ = scatter_dof(fg_lin, a, radius_px, p, None)
+    return out_c, np.clip(out_w, 0.0, 1.0)

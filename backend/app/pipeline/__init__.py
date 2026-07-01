@@ -127,16 +127,21 @@ def run_pipeline(
     fg = _refine.decontaminate(work, alpha, bundle)
     dump("02_fg.jpg", (np.clip(fg, 0, 1) * 255).astype(np.uint8))
 
-    # 4 — depth/disparity
+    # 4 — depth/disparity. Build two smoothed depth fields that DON'T bleed across the silhouette:
+    # one for the subject, one for the background (subject hole filled with background depth). This
+    # is what lets the whole scene grade continuously without a bright ring around the person.
     emit(*_STAGES[3], 3 / n)
     disparity = _depth.estimate_disparity(work, bundle)
+    disp_fg = _depth.smooth_depth(disparity)
+    disp_bg = _depth.background_depth(disparity, (alpha > 0.5).astype(np.uint8))
     dump("03_disparity.png", disparity, gray=True)
+    dump("03b_disp_bg.png", disp_bg, gray=True)
 
-    # focal plane: lock to the subject (median disparity under the matte) so the person is sharp
-    # and the background falls off correctly — far more accurate than a fixed guess.
+    # focal plane: lock to the subject (median depth under the matte) so the person is sharp
+    # and everything grades away from there — far more accurate than a fixed guess.
     focus = params.disp_focus
     if params.autofocus:
-        subj = disparity[alpha > 0.5]
+        subj = disp_fg[alpha > 0.5]
         if subj.size > 64:
             focus = float(np.median(subj))
             log.info("autofocus → disp_focus=%.3f (subject)", focus)
@@ -147,14 +152,14 @@ def run_pipeline(
     clean_bg = _inpaint.fill_background(work, alpha, bundle)
     dump("04_clean_bg.jpg", clean_bg)
 
-    # 6 — blur the CLEAN background (depth-graded, linear-light scatter)
+    # 6 — blur the CLEAN background by BACKGROUND depth (depth-graded, linear-light scatter)
     emit(*_STAGES[5], 5 / n)
-    blurred_bg = render_lens_blur(clean_bg, disparity, blur_p)
+    blurred_bg = render_lens_blur(clean_bg, disp_bg, blur_p)
     dump("05_blurred_bg.jpg", blurred_bg)
 
-    # 7 — recomposite the sharp subject, premultiplied alpha
+    # 7 — composite the subject with its OWN depth-of-field over the blurred background
     emit(*_STAGES[6], 6 / n)
-    out = _compose.compose(fg, alpha, blurred_bg, disparity, blur_p)
+    out = _compose.compose(fg, alpha, blurred_bg, disp_fg, blur_p)
     dump("06_output.jpg", out)
 
     emit("done", "Done", 1.0)

@@ -128,7 +128,7 @@ def _load_birefnet(device: str):
 # it took 60-130s/render and leaked MPS memory. Depth Anything V2 runs in ~0.2-1s and is
 # stable; in this pipeline depth only grades the blur falloff (the clean edge comes from
 # matte→decontaminate→inpaint), so boundary accuracy of depth is not the edge gate.
-_DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Base-hf")
+_DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Large-hf")
 
 
 def _load_depth(device: str):
