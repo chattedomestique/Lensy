@@ -12,6 +12,7 @@ correct order; the stages live in sibling modules and each degrades gracefully.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -94,6 +95,24 @@ def run_pipeline(
     work = _downscale(rgb_u8, params.working_res)
     n = len(_STAGES)
 
+    # optional diagnostic capture: set LENSY_DEBUG_DIR to dump input + every stage as images
+    dbg = os.environ.get("LENSY_DEBUG_DIR")
+    if dbg:
+        os.makedirs(dbg, exist_ok=True)
+
+    def dump(name: str, arr: np.ndarray, gray: bool = False) -> None:
+        if not dbg:
+            return
+        try:
+            if gray:
+                cv2.imwrite(os.path.join(dbg, name), (np.clip(arr, 0, 1) * 255).astype(np.uint8))
+            else:
+                cv2.imwrite(os.path.join(dbg, name), cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+        except Exception:
+            log.debug("debug dump failed for %s", name, exc_info=True)
+
+    dump("00_input.jpg", work)
+
     # 1 — matte (soft alpha)
     emit(*_STAGES[0], 0 / n)
     alpha = _matte.estimate_alpha(work, bundle)
@@ -101,14 +120,17 @@ def run_pipeline(
     # 2 — refine alpha to true edges
     emit(*_STAGES[1], 1 / n)
     alpha = _refine.refine_alpha(work, alpha)
+    dump("01_alpha.png", alpha, gray=True)
 
     # 3 — decontaminate foreground color (THE anti-halo step)
     emit(*_STAGES[2], 2 / n)
     fg = _refine.decontaminate(work, alpha, bundle)
+    dump("02_fg.jpg", (np.clip(fg, 0, 1) * 255).astype(np.uint8))
 
     # 4 — depth/disparity
     emit(*_STAGES[3], 3 / n)
     disparity = _depth.estimate_disparity(work, bundle)
+    dump("03_disparity.png", disparity, gray=True)
 
     # focal plane: lock to the subject (median disparity under the matte) so the person is sharp
     # and the background falls off correctly — far more accurate than a fixed guess.
@@ -123,14 +145,17 @@ def run_pipeline(
     # 5 — remove subject + inpaint the hole → clean background plate
     emit(*_STAGES[4], 4 / n)
     clean_bg = _inpaint.fill_background(work, alpha, bundle)
+    dump("04_clean_bg.jpg", clean_bg)
 
     # 6 — blur the CLEAN background (depth-graded, linear-light scatter)
     emit(*_STAGES[5], 5 / n)
     blurred_bg = render_lens_blur(clean_bg, disparity, blur_p)
+    dump("05_blurred_bg.jpg", blurred_bg)
 
     # 7 — recomposite the sharp subject, premultiplied alpha
     emit(*_STAGES[6], 6 / n)
     out = _compose.compose(fg, alpha, blurred_bg, disparity, blur_p)
+    dump("06_output.jpg", out)
 
     emit("done", "Done", 1.0)
     log.info("pipeline done in %.2fs (work res %s)", time.time() - t0, work.shape[:2])

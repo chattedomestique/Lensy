@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import cv2
 import numpy as np
@@ -17,9 +18,27 @@ from .runtime import ModelBundle
 
 log = logging.getLogger("lensy.refine")
 
+# BiRefNet mattes can carry a very wide, low-slope transition band (5%+ of the frame). Composited
+# over a blurred background that wide band lets the bright background glow through as a HALO. We
+# steepen the transition with a smoothstep so the edge stays soft (a few px, keeps hair) without
+# the broad feather. Tunable via LENSY_MATTE_TIGHTEN=lo,hi (or "off").
+_TIGHTEN = os.environ.get("LENSY_MATTE_TIGHTEN", "0.35,0.65")
+
+
+def _tighten(a: np.ndarray) -> np.ndarray:
+    if _TIGHTEN.lower() in ("off", "0", ""):
+        return a
+    try:
+        lo, hi = (float(x) for x in _TIGHTEN.split(","))
+    except ValueError:
+        lo, hi = 0.35, 0.65
+    t = np.clip((a - lo) / max(hi - lo, 1e-4), 0.0, 1.0)
+    return (t * t * (3.0 - 2.0 * t)).astype(np.float32)  # smoothstep
+
 
 def refine_alpha(rgb_u8: np.ndarray, alpha: np.ndarray, radius: int = 8, eps: float = 1e-4) -> np.ndarray:
-    """Edge-snap the soft alpha to the guide image. Returns float32 [0,1]."""
+    """Edge-snap the soft alpha to the guide image, then steepen the transition to kill halos.
+    Returns float32 [0,1]."""
     guide = rgb_u8.astype(np.float32) / 255.0
     a = alpha.astype(np.float32)
     try:
@@ -29,6 +48,7 @@ def refine_alpha(rgb_u8: np.ndarray, alpha: np.ndarray, radius: int = 8, eps: fl
         log.info("ximgproc unavailable; refine via joint-bilateral fallback")
         # joint bilateral approximates the edge-aware behaviour
         out = cv2.bilateralFilter(a, d=radius * 2 + 1, sigmaColor=0.1, sigmaSpace=radius)
+    out = _tighten(np.clip(out, 0.0, 1.0).astype(np.float32))
     return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
