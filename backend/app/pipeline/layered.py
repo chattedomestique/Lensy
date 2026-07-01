@@ -164,31 +164,36 @@ def _apply_swirl(img: np.ndarray, strength: float) -> np.ndarray:
     return acc.astype(np.float32)
 
 
-def _apply_sweet_overlay(img_lin: np.ndarray, p: BlurParams) -> np.ndarray:
-    """Lensbaby: a sharp central 'sweet spot' with blur growing radially outward — applied to the
-    FINAL composite (on top of everything), so anything outside the spot softens, subject included.
-    A smooth multi-level gaussian blend keeps the falloff dreamy and gradual."""
-    if p.sweet <= 0:
-        return img_lin
-    h, w = img_lin.shape[:2]
-    r_frac, _, _ = _field(h, w)
-    t = np.clip((r_frac - p.sweet_size) / max(1.0 - p.sweet_size, 1e-3), 0.0, 1.0)
-    amt = (t * t * (3.0 - 2.0 * t)) * float(p.sweet)  # 0 in the spot → sweet at the corners
-    max_sig = max(1.0, (p.k / 100.0) * float(np.hypot(h, w)) * 0.05)
+def _var_radial_blur(arr: np.ndarray, amt: np.ndarray, max_sig: float) -> np.ndarray:
+    """Per-pixel variable gaussian blur via a smooth multi-level blend by `amt` (0..1)."""
     levels = [
-        img_lin,
-        cv2.GaussianBlur(img_lin, (0, 0), sigmaX=max_sig * 0.35),
-        cv2.GaussianBlur(img_lin, (0, 0), sigmaX=max_sig * 0.7),
-        cv2.GaussianBlur(img_lin, (0, 0), sigmaX=max_sig),
+        arr,
+        cv2.GaussianBlur(arr, (0, 0), sigmaX=max_sig * 0.35),
+        cv2.GaussianBlur(arr, (0, 0), sigmaX=max_sig * 0.7),
+        cv2.GaussianBlur(arr, (0, 0), sigmaX=max_sig),
     ]
     idx = amt * (len(levels) - 1)
     lo = np.clip(np.floor(idx).astype(np.int32), 0, len(levels) - 2)
-    frac = (idx - lo)[..., None]
+    frac = idx - lo
+    if arr.ndim == 3:
+        frac = frac[..., None]
     out = np.array(levels[0])
     for k in range(len(levels) - 1):
-        m = (lo == k)[..., None]
+        m = lo == k
+        if arr.ndim == 3:
+            m = m[..., None]
         out = np.where(m, levels[k] * (1.0 - frac) + levels[k + 1] * frac, out)
     return out.astype(np.float32)
+
+
+def _sweet_amount(h: int, w: int, p: BlurParams, cx: float, cy: float) -> np.ndarray:
+    """Lensbaby field falloff: 0 inside the sweet spot → `sweet` at the far edge, measured from
+    the sweet-spot center (cx, cy) — the SUBJECT's centroid, so blur radiates out from the person."""
+    halfdiag = 0.5 * float(np.hypot(w, h))
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    r = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / halfdiag
+    t = np.clip((r - p.sweet_size) / max(1.0 - p.sweet_size, 1e-3), 0.0, 1.0)
+    return ((t * t * (3.0 - 2.0 * t)) * float(p.sweet)).astype(np.float32)
 
 
 def render_layered_dof(
@@ -231,9 +236,24 @@ def render_layered_dof(
         a = np.clip(alpha, 0.0, 1.0)[..., None].astype(np.float32)
         fgc, fga = fg_lin * a, a
 
+    # --- Lensbaby sweet spot: blur everything outside a sweet spot centered on the SUBJECT.
+    # Applied to the premultiplied sheets (fg color+alpha AND background) BEFORE compositing, so a
+    # softened subject edge fades to transparent rather than bleeding a bright halo (no glow). ---
+    if p.sweet > 0:
+        a2 = np.clip(alpha, 0.0, 1.0).astype(np.float32)
+        tot = float(a2.sum())
+        if tot > 1.0:  # sweet spot centers on the subject's centroid
+            yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+            cx, cy = float((xx * a2).sum() / tot), float((yy * a2).sum() / tot)
+        else:
+            cx, cy = w / 2.0, h / 2.0
+        amt = _sweet_amount(h, w, p, cx, cy)
+        max_sig = max(1.0, (p.k / 100.0) * float(np.hypot(h, w)) * 0.05)
+        fgc = _var_radial_blur(fgc, amt, max_sig)
+        fga = _var_radial_blur(fga[..., 0], amt, max_sig)[..., None]
+        bg_rendered = _var_radial_blur(bg_rendered, amt, max_sig)
+
     # --- compose foreground OVER background (premultiplied) ---
     out_lin = fgc + bg_rendered * (1.0 - fga)
-    # Lensbaby sweet spot goes on TOP of everything (subject included) — a field-radius blur
-    out_lin = _apply_sweet_overlay(out_lin, p)
     out_lin = tonemap_highlights(out_lin)
     return (np.clip(linear_to_srgb(out_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
