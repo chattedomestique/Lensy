@@ -36,6 +36,7 @@ class BlurParams:
     cat_eye: float = 0.2       # optical vignetting toward edges (0 = off)
     n_bins: int = 10           # CoC quantization layers (smoother gradient)
     focus_range: float = 0.12  # half-width (in normalized disparity) of the in-focus DoF zone
+    subject_dof: bool = False  # also blur the subject by depth (cinematic) vs keep it sharp
 
 
 # ---- aperture kernels ---------------------------------------------------------------

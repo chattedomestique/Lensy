@@ -25,7 +25,7 @@ def _try(name: str, fn) -> bool:
         return False
 
 
-DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Large-hf")
+DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "apple/DepthPro-hf")
 
 
 MATTE_MODEL_ID = os.environ.get("LENSY_MATTE_MODEL", "ZhengPeng7/BiRefNet_HR-matting")
@@ -38,12 +38,16 @@ def fetch_birefnet() -> None:
 
 
 def fetch_depth() -> None:
-    # Depth Anything V2 (transformers-native). Apple Depth Pro was dropped — too slow / leaky
-    # on 16GB Apple Silicon; see backend/app/pipeline/runtime.py._load_depth.
-    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+    if "depthpro" in DEPTH_MODEL_ID.lower():
+        from transformers import DepthProForDepthEstimation, DepthProImageProcessor
 
-    AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
-    AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID)
+        DepthProImageProcessor.from_pretrained(DEPTH_MODEL_ID)
+        DepthProForDepthEstimation.from_pretrained(DEPTH_MODEL_ID)
+    else:
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+        AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
+        AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID)
 
 
 def fetch_lama() -> None:

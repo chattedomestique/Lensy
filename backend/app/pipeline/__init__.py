@@ -39,6 +39,7 @@ class RenderParams:
     k: float = 60.0
     disp_focus: float = 0.7      # focal plane in disparity space; ignored when autofocus is on
     autofocus: bool = True       # lock focus to the subject (median disparity under the matte)
+    subject_dof: bool = False    # blur the subject by depth too (cinematic) vs keep it sharp
     blades: int = 0
     rotation: float = 0.0
     highlight_boost: float = 0.18
@@ -49,6 +50,7 @@ class RenderParams:
         return BlurParams(
             k=self.k,
             disp_focus=self.disp_focus if disp_focus is None else disp_focus,
+            subject_dof=self.subject_dof,
             blades=self.blades,
             rotation=self.rotation,
             highlight_boost=self.highlight_boost,

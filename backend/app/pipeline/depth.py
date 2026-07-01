@@ -75,15 +75,17 @@ def _model_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
     with torch.no_grad():
         out = bundle.depth_model(**inputs)
     post = processor.post_process_depth_estimation(out, target_sizes=[(h, w)])
-    # Depth Anything V2 predicted_depth is disparity-like already (near => large) — use directly
-    disp = post[0]["predicted_depth"].detach().cpu().float().numpy().astype(np.float32)
+    pred = post[0]["predicted_depth"].detach().cpu().float().numpy().astype(np.float32)
     if bundle.device == "mps":
         try:
             torch.mps.empty_cache()
         except Exception:
             pass
-    if disp.shape != (h, w):
-        disp = cv2.resize(disp, (w, h), interpolation=cv2.INTER_LINEAR)
+    if pred.shape != (h, w):
+        pred = cv2.resize(pred, (w, h), interpolation=cv2.INTER_LINEAR)
+    # Depth Pro outputs metric depth (meters) → disparity = 1/depth (near = large). Depth Anything
+    # outputs a disparity-like value already (near = large) → use directly.
+    disp = 1.0 / np.clip(pred, 1e-3, None) if bundle.depth_metric else pred
     return _normalize(disp)
 
 
