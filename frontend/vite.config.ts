@@ -16,6 +16,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/render": { target: BACKEND, changeOrigin: true },
+      "/analyze": { target: BACKEND, changeOrigin: true },
       "/healthz": { target: BACKEND, changeOrigin: true },
     },
   },

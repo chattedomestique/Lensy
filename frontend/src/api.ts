@@ -60,27 +60,64 @@ export async function pingHealth(base: string): Promise<{ ok: boolean; detail: s
   }
 }
 
+/** Analyze a photo → matte + depth map (fast). Returns an id + the working size. */
+export async function analyze(file: File): Promise<{ analyzeId: string; width: number; height: number }> {
+  const form = new FormData();
+  form.append("photo", file);
+  const r = await fetch(apiUrl("/analyze"), { method: "POST", body: form });
+  if (!r.ok) {
+    const b = await r.json().catch(() => ({}));
+    throw new ApiError(b?.error?.message ?? `could not analyze (${r.status})`);
+  }
+  const d = await r.json();
+  return { analyzeId: d.analyze_id as string, width: d.width as number, height: d.height as number };
+}
+
+export const depthUrl = (analyzeId: string) => apiUrl(`/analyze/${analyzeId}/depth.png`);
+export const matteUrl = (analyzeId: string) => apiUrl(`/analyze/${analyzeId}/matte.png`);
+
+function appendParams(form: FormData, params: RenderParams): void {
+  form.append("k", String(params.k));
+  form.append("disp_focus", String(params.disp_focus));
+  form.append("autofocus", String(params.autofocus));
+  form.append("subject_dof", String(params.subject_dof));
+  form.append("blades", String(params.blades));
+  form.append("highlight_boost", String(params.highlight_boost));
+  form.append("cat_eye", String(params.cat_eye));
+}
+
+/** Render from an analysis + an (edited) depth-map PNG blob. */
+export function renderFromAnalyze(
+  analyzeId: string,
+  depthPng: Blob,
+  params: RenderParams,
+  onProgress: (p: ProgressEvent) => void,
+): RenderHandle {
+  const form = new FormData();
+  form.append("analyze_id", analyzeId);
+  form.append("depth", depthPng, "depth.png");
+  appendParams(form, params);
+  return runRenderJob(form, onProgress);
+}
+
 /** Start a render and stream progress. Returns a handle whose `done` resolves to an image URL. */
 export function render(
   file: File,
   params: RenderParams,
   onProgress: (p: ProgressEvent) => void,
 ): RenderHandle {
+  const form = new FormData();
+  form.append("photo", file);
+  appendParams(form, params);
+  return runRenderJob(form, onProgress);
+}
+
+function runRenderJob(form: FormData, onProgress: (p: ProgressEvent) => void): RenderHandle {
   let source: EventSource | null = null;
   let cancelled = false;
   let serverError: string | null = null;
 
   const done = (async (): Promise<string> => {
-    const form = new FormData();
-    form.append("photo", file);
-    form.append("k", String(params.k));
-    form.append("disp_focus", String(params.disp_focus));
-    form.append("autofocus", String(params.autofocus));
-    form.append("subject_dof", String(params.subject_dof));
-    form.append("blades", String(params.blades));
-    form.append("highlight_boost", String(params.highlight_boost));
-    form.append("cat_eye", String(params.cat_eye));
-
     const start = await fetch(apiUrl("/render"), { method: "POST", body: form });
     if (!start.ok) {
       const body = await start.json().catch(() => ({}));

@@ -68,6 +68,39 @@
         <!-- right: controls -->
         <aside class="panel">
           <div class="controls">
+            <!-- Depth map: generate, then edit -->
+            <button id="generate" class="btn primary" disabled>Generate depth map</button>
+
+            <div id="depth-controls" class="depth-controls hidden">
+              <div class="control">
+                <label><span class="title">View</span></label>
+                <div id="view" class="seg" role="group" aria-label="View">
+                  <button data-view="photo" aria-pressed="true">Photo</button>
+                  <button data-view="depth" aria-pressed="false">Depth</button>
+                </div>
+                <div class="hint">Edit the depth map, then Render. Tap the photo to set focus.</div>
+              </div>
+              <div class="control">
+                <label for="d-black"><span class="title">Far point</span><span id="d-black-val" class="val">0.00</span></label>
+                <input id="d-black" type="range" min="0" max="100" value="0" />
+              </div>
+              <div class="control">
+                <label for="d-white"><span class="title">Near point</span><span id="d-white-val" class="val">1.00</span></label>
+                <input id="d-white" type="range" min="0" max="100" value="100" />
+                <div class="hint">Pull Far/Near in so the subject reads white, the background black (like an expander).</div>
+              </div>
+              <div class="control">
+                <label for="d-contrast"><span class="title">Separation</span><span id="d-contrast-val" class="val">0.00</span></label>
+                <input id="d-contrast" type="range" min="0" max="100" value="0" />
+                <div class="hint">Steepen the split between near and far.</div>
+              </div>
+              <div class="control">
+                <label for="d-smooth"><span class="title">Smoothing</span><span id="d-smooth-val" class="val">0.00</span></label>
+                <input id="d-smooth" type="range" min="0" max="100" value="0" />
+                <div class="hint">Smooth the background gradient (keeps the subject crisp).</div>
+              </div>
+            </div>
+
             <div class="control">
               <label for="k"><span class="title">Blur</span><span id="k-val" class="val">60</span></label>
               <input id="k" type="range" min="0" max="100" value="60" />
@@ -107,10 +140,10 @@
             </div>
 
             <div class="row">
-              <button id="render" class="btn primary" disabled>Render</button>
+              <button id="render" class="btn primary hidden">Render</button>
               <button id="reset" class="btn ghost" disabled>Reset</button>
             </div>
-            <button id="download" class="btn ghost hidden">Download</button>
+            <button id="save" class="btn ghost hidden">Save photo</button>
           </div>
         </aside>
       </div>

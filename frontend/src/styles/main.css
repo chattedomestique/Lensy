@@ -247,6 +247,16 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px 
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
 .seg button:hover { color: var(--text); }
 
+/* --- depth-map editor group --- */
+.depth-controls {
+  display: flex; flex-direction: column; gap: var(--s5);
+  padding: var(--s4); margin-bottom: var(--s2);
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-left: 3px solid var(--accent-2); border-radius: var(--r-panel);
+  animation: panel-in var(--t) var(--spring);
+}
+#generate { width: 100%; }
+
 /* --- buttons --- */
 button.btn {
   font: inherit; font-weight: 600; cursor: pointer;
