@@ -80,7 +80,7 @@ async def start_render(
     k: float = Form(60.0),
     disp_focus: float = Form(0.7),
     autofocus: bool = Form(True),
-    subject_dof: bool = Form(False),
+    subject_dof: bool = Form(True),
     blades: int = Form(0),
     rotation: float = Form(0.0),
     highlight_boost: float = Form(0.18),

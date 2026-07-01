@@ -20,12 +20,12 @@ from typing import Callable
 import cv2
 import numpy as np
 
-from . import compose as _compose
 from . import depth as _depth
 from . import inpaint as _inpaint
+from . import layered as _layered
 from . import matte as _matte
 from . import refine as _refine
-from .blur import BlurParams, focal_radius, render_lens_blur
+from .blur import BlurParams, focal_radius
 from .runtime import ModelBundle
 
 log = logging.getLogger("lensy.pipeline")
@@ -39,7 +39,7 @@ class RenderParams:
     k: float = 60.0
     disp_focus: float = 0.7      # focal plane in disparity space; ignored when autofocus is on
     autofocus: bool = True       # lock focus to the subject (median disparity under the matte)
-    subject_dof: bool = False    # blur the subject by depth too (cinematic) vs keep it sharp
+    subject_dof: bool = True     # blur the subject by depth too (cinematic) vs keep it sharp
     blades: int = 0
     rotation: float = 0.0
     highlight_boost: float = 0.18
@@ -148,29 +148,23 @@ def run_pipeline(
     log.info("focus=%.3f (%s)", focus, "m" if metric else "disp")
     blur_p = params.blur_params(disp_focus=focus)
 
-    radius_fg = focal_radius(fg_signal, focus, metric, blur_p)
-    radius_bg = focal_radius(bg_signal, focus, metric, blur_p)
     if dbg:
-        rmax = max(float(radius_bg.max()), 1e-3)
-        dump("03_radius_bg.png", radius_bg / rmax, gray=True)
-        dump("03b_radius_fg.png", radius_fg / rmax, gray=True)
+        rb = focal_radius(bg_signal, focus, metric, blur_p)
+        dump("03_radius_bg.png", rb / max(float(rb.max()), 1e-3), gray=True)
 
-    # 5 — remove subject + inpaint the hole → clean background plate
+    # 5 — remove subject + inpaint the hole → clean background plate (the disocclusion fill)
     emit(*_STAGES[4], 4 / n)
     clean_bg = _inpaint.fill_background(work, alpha, bundle)
     dump("04_clean_bg.jpg", clean_bg)
 
-    # 6 — blur the CLEAN background by its depth-driven CoC (linear-light scatter)
+    # 6 + 7 — layered occlusion-aware depth-of-field: background sheet + foreground sheet, each
+    # rendered by fine depth-slice energy-conserving aperture scatter, composited back-to-front,
+    # then foreground over background. Physically-based lens/aperture optics (see layered.py).
     emit(*_STAGES[5], 5 / n)
-    blurred_bg = render_lens_blur(clean_bg, radius_bg, blur_p)
-    dump("05_blurred_bg.jpg", blurred_bg)
-
-    # 7 — composite the subject over the blurred background. For cinematic subject-DoF, blur the
-    # ORIGINAL subject color (not the decontaminated F, whose bright extrapolated edge would be
-    # amplified into a white halo by the blur); the sharp path keeps F for its clean anti-halo edge.
     emit(*_STAGES[6], 6 / n)
-    fg_color = (work.astype(np.float32) / 255.0) if params.subject_dof else fg
-    out = _compose.compose(fg_color, alpha, blurred_bg, radius_fg, blur_p)
+    out = _layered.render_layered_dof(
+        fg, alpha, clean_bg, fg_signal, bg_signal, focus, metric, blur_p
+    )
     dump("06_output.jpg", out)
 
     emit("done", "Done", 1.0)

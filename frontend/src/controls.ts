@@ -17,6 +17,8 @@ export class Controls {
   private highlight = $("highlight") as HTMLInputElement;
   private bladesGroup = $("blades");
   private blades = 0;
+  private dofGroup = $("dof");
+  private subjectDof = true; // cinematic (subject blurs by depth) vs sharp cutout
   private autofocus = true; // on until the user drags the focal slider or taps the photo
 
   constructor(private onChange: () => void) {
@@ -31,6 +33,16 @@ export class Controls {
       btn.addEventListener("click", () => {
         this.blades = Number(btn.dataset.blades ?? "0");
         this.bladesGroup
+          .querySelectorAll<HTMLButtonElement>("button")
+          .forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+        this.reflect();
+      });
+    });
+
+    this.dofGroup.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        this.subjectDof = btn.dataset.dof === "1";
+        this.dofGroup
           .querySelectorAll<HTMLButtonElement>("button")
           .forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
         this.reflect();
@@ -51,6 +63,7 @@ export class Controls {
       k: Number(this.k.value),
       disp_focus: Number(this.focus.value) / 100,
       autofocus: this.autofocus,
+      subject_dof: this.subjectDof,
       blades: this.blades,
       highlight_boost: Number(this.highlight.value) / 100,
       cat_eye: 0.2,
@@ -63,9 +76,13 @@ export class Controls {
     this.highlight.value = "18";
     this.blades = 0;
     this.autofocus = true;
+    this.subjectDof = true;
     this.bladesGroup
       .querySelectorAll<HTMLButtonElement>("button")
       .forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.blades === "0")));
+    this.dofGroup
+      .querySelectorAll<HTMLButtonElement>("button")
+      .forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.dof === "1")));
     this.reflect();
   }
 
@@ -74,6 +91,7 @@ export class Controls {
     $("focus-val").textContent = this.autofocus ? "auto" : (Number(this.focus.value) / 100).toFixed(2);
     $("highlight-val").textContent = (Number(this.highlight.value) / 100).toFixed(2);
     $("blades-val").textContent = BLADE_LABEL[this.blades] ?? `${this.blades}-blade`;
+    $("dof-val").textContent = this.subjectDof ? "cinematic" : "sharp";
     this.onChange();
   }
 }

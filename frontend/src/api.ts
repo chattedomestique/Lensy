@@ -8,6 +8,7 @@ export interface RenderParams {
   k: number; // 0..100 blur strength
   disp_focus: number; // 0..1 focal plane (used only when autofocus is false)
   autofocus: boolean; // lock focus to the subject
+  subject_dof: boolean; // cinematic (blur subject by depth) vs sharp cutout
   blades: number; // 0 = circular, else N-gon
   highlight_boost: number; // 0..2 bloom strength
   cat_eye: number; // 0..1
@@ -74,6 +75,7 @@ export function render(
     form.append("k", String(params.k));
     form.append("disp_focus", String(params.disp_focus));
     form.append("autofocus", String(params.autofocus));
+    form.append("subject_dof", String(params.subject_dof));
     form.append("blades", String(params.blades));
     form.append("highlight_boost", String(params.highlight_boost));
     form.append("cat_eye", String(params.cat_eye));
