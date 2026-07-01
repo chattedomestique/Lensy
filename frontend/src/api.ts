@@ -68,6 +68,7 @@ export function render(
 ): RenderHandle {
   let source: EventSource | null = null;
   let cancelled = false;
+  let serverError: string | null = null;
 
   const done = (async (): Promise<string> => {
     const form = new FormData();
@@ -86,53 +87,54 @@ export function render(
       throw new ApiError(body?.error?.message ?? `could not start render (${start.status})`);
     }
     const { job_id } = (await start.json()) as { job_id: string };
+    const resultPath = `/render/${job_id}/result`;
 
-    const resultUrl = await new Promise<string>((resolve, reject) => {
-      source = new EventSource(apiUrl(`/render/${job_id}/events`));
-      source.addEventListener("progress", (e) => {
-        if (cancelled) return;
+    // The render can take ~90s. Live progress comes over SSE, but a long-held stream can be
+    // dropped by the tunnel/proxy — so the SSE is best-effort for the progress bar only, and the
+    // RESULT is obtained by polling the result endpoint, which is robust to a dropped stream.
+    source = new EventSource(apiUrl(`/render/${job_id}/events`));
+    source.addEventListener("progress", (e) => {
+      if (cancelled) return;
+      try {
+        onProgress(JSON.parse((e as MessageEvent).data));
+      } catch {
+        /* ignore malformed frame */
+      }
+    });
+    source.addEventListener("error", (e) => {
+      // a *server* error event carries data; a transport drop does not (polling will recover it)
+      const data = (e as MessageEvent).data;
+      if (data) {
         try {
-          onProgress(JSON.parse((e as MessageEvent).data));
+          serverError = JSON.parse(data).error ?? "render failed";
         } catch {
-          /* ignore malformed frame */
+          /* transport drop — ignore, polling handles it */
         }
-      });
-      source.addEventListener("done", (e) => {
-        try {
-          const data = JSON.parse((e as MessageEvent).data);
-          resolve(data.result_url ?? `/render/${job_id}/result`);
-        } catch {
-          resolve(`/render/${job_id}/result`);
-        }
-      });
-      source.addEventListener("error", (e) => {
-        // distinguish a server "error" event (has data) from a transport drop
-        const data = (e as MessageEvent).data;
-        if (data) {
-          try {
-            reject(new ApiError(JSON.parse(data).error ?? "render failed"));
-            return;
-          } catch {
-            /* fall through */
-          }
-        }
-        if (source && source.readyState === EventSource.CLOSED) {
-          reject(new ApiError("connection to the render server was lost"));
-        }
-      });
+      }
     });
 
-    (source as EventSource | null)?.close();
-    if (cancelled) throw new ApiError("cancelled");
-
-    // fetch the finished image as a blob → object URL the <img> can show
-    // (result_url from the server is a path like /render/<id>/result → prefix the base)
-    const img = await fetch(apiUrl(resultUrl));
-    if (!img.ok) {
-      const body = await img.json().catch(() => ({}));
-      throw new ApiError(body?.error?.message ?? "could not fetch the result");
+    // poll the result until it's ready (200), errored (500), or we time out
+    const deadline = Date.now() + 5 * 60 * 1000;
+    try {
+      while (!cancelled) {
+        if (serverError) throw new ApiError(serverError);
+        const r = await fetch(apiUrl(resultPath));
+        if (r.status === 200) {
+          return URL.createObjectURL(await r.blob());
+        }
+        if (r.status === 409) {
+          // still rendering — wait and retry
+          if (Date.now() > deadline) throw new ApiError("render timed out");
+          await new Promise((res) => setTimeout(res, 1500));
+          continue;
+        }
+        const body = await r.json().catch(() => ({}));
+        throw new ApiError(body?.error?.message ?? `render failed (${r.status})`);
+      }
+      throw new ApiError("cancelled");
+    } finally {
+      source?.close();
     }
-    return URL.createObjectURL(await img.blob());
   })();
 
   return {
