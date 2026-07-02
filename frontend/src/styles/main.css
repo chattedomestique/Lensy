@@ -133,12 +133,15 @@ html, body {
 }
 canvas.stage-img { image-rendering: auto; }
 .erase-layer { pointer-events: none; }
-/* media wrapper — pinch-zoom / pan transform applies here so image + overlays move together */
+/* media wrapper — pinch-zoom / pan transform applies here so image + overlays move together.
+   It's a purely visual transform container: ALL input is handled by #drag-surface, which sits
+   above it. So it must never intercept pointer/touch events — otherwise, while empty, this
+   absolutely-positioned overlay blankets the dropzone and swallows the "tap to add a photo" tap. */
 .stage-media {
   position: absolute; inset: 0;
   transform-origin: 0 0;
   will-change: transform;
-  touch-action: none;
+  pointer-events: none;
 }
 
 /* dropzone (empty state) */
