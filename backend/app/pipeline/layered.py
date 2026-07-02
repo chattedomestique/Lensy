@@ -28,6 +28,8 @@ aberration (per-channel CoC) for bokeh fringing."""
 
 from __future__ import annotations
 
+import os
+
 import cv2
 import numpy as np
 
@@ -353,9 +355,19 @@ def render_layered_dof(
     """Full occlusion-aware render → final uint8 sRGB image."""
     h, w = alpha.shape[:2]
     a_sub = np.clip(alpha, 0.0, 1.0).astype(np.float32)
-    # near-foreground occluders get pulled out of the flat plate and rendered as a spreading layer
-    near_a = _near_foreground_alpha(bg_signal, focus, metric, a_sub)
-    has_near = float(near_a.sum()) > (0.0006 * h * w)
+    # Near-foreground occluders (a pole/railing right by the lens): the unified back-to-front sheet
+    # below ALREADY renders these occlusion-correctly — the near depth-slice scatters OVER the far
+    # slices, so a near object's blurred edge softly reveals the background behind it. Pulling the
+    # occluder into a SEPARATE spreading layer (with inpaint-behind) was strictly worse: its coverage
+    # edge composited as a hard vertical "layer line" against whatever sat behind it, and the inpaint
+    # occasionally bled a distant colour inward. So it's off by default; LENSY_NEAR_LAYER=1 re-enables
+    # it for experimentation.
+    if os.environ.get("LENSY_NEAR_LAYER") == "1":
+        near_a = _near_foreground_alpha(bg_signal, focus, metric, a_sub)
+        has_near = float(near_a.sum()) > (0.0006 * h * w)
+    else:
+        near_a = np.zeros((h, w), np.float32)
+        has_near = False
 
     # --- background sheet (opaque, complete via inpaint) ---
     # if there are near occluders, remove them from the FAR plate (+ fill behind) so the sheet is
