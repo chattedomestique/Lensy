@@ -15,6 +15,9 @@ export interface RenderParams {
   swirl: number; // 0..1 Petzval swirl
   sweet: number; // 0..1 Lensbaby sweet-spot intensity
   sweet_size: number; // 0..1 sweet-spot radius
+  halation: number; // 0..1 reddish film glow out of the highlights
+  halation_size: number; // 0..1 how far the halation spreads
+  ca: number; // 0..1 lateral chromatic aberration (colour fringing toward edges)
 }
 
 export interface ProgressEvent {
@@ -90,6 +93,9 @@ function appendParams(form: FormData, params: RenderParams): void {
   form.append("swirl", String(params.swirl));
   form.append("sweet", String(params.sweet));
   form.append("sweet_size", String(params.sweet_size));
+  form.append("halation", String(params.halation));
+  form.append("halation_size", String(params.halation_size));
+  form.append("ca", String(params.ca));
 }
 
 /** Render from an analysis + an (edited) depth-map PNG blob. */

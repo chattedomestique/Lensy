@@ -1,18 +1,32 @@
-// Client-side FOCUS-MAP editor. The subject is the brightest (in focus); anything nearer OR
-// farther fades to black (more blur). You place four anchors — subject / foreground / midground
-// / background — by tapping, and the map is built from them + two global sliders. Everything is
-// instant (works at a reduced res; the backend upscales). What's exported to the backend is a
+// Client-side FOCUS-MAP editor, driven by four continuous sliders (no anchor tapping).
+// The subject (matte) is always in focus (white); everything nearer OR farther fades to black
+// (more blur). The four controls shape that falloff:
+//
+//   amount    — width of the separation between the sharp subject and the blurred surround.
+//               Higher = a narrower in-focus band = more of the scene blurred (stronger pop).
+//   position  — slides the focal plane through depth; moves the sharp band toward the
+//               foreground or the background together.
+//   contrast  — a levels curve on the focus map: darks darker, lights lighter, so the split
+//               between in-focus and out-of-focus is crisper.
+//   falloff   — feathering of the blur gradient (a matte-excluding blur; subject stays crisp).
+//
+// Everything runs instantly at reduced resolution; the backend upscales. What's exported is a
 // depth map centered on the subject (subject = 0.5, nearer → 1, farther → 0) so the renderer's
 // |depth − focus| gives exactly the blur shown, with front/back preserved for occlusion.
 
-export type AnchorName = "subject" | "foreground" | "background";
-
 export interface DepthSettings {
-  separation: number; // 0..1 — steepen the in-focus ↔ blurred split
-  smoothing: number; // 0..1 — smooth the background gradient (subject kept crisp)
+  amount: number; // 0..1 — width of fg/bg separation (higher = narrower in-focus band)
+  position: number; // 0..1 — focal-plane position (0.5 = subject plane)
+  contrast: number; // 0..1 — levels/contrast on the focus map
+  falloff: number; // 0..1 — feathering of the blur gradient
 }
 
-export const DEFAULT_SETTINGS: DepthSettings = { separation: 0, smoothing: 0 };
+export const DEFAULT_SETTINGS: DepthSettings = {
+  amount: 0.5,
+  position: 0.5,
+  contrast: 0,
+  falloff: 0.2,
+};
 
 const clampIdx = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -71,8 +85,8 @@ export class DepthEditor {
   private matte: Float32Array = new Float32Array();
   private focus: Float32Array = new Float32Array(); // 1 = in focus (white), 0 = max blur
   private edited: Float32Array = new Float32Array(); // subject=0.5, near→1, far→0 (for backend)
+  private subjectDepth = 0.5; // auto median depth under the matte
 
-  anchors: Partial<Record<AnchorName, number>> = {}; // stored raw-depth values
   settings: DepthSettings = { ...DEFAULT_SETTINGS };
 
   get ready(): boolean {
@@ -91,86 +105,71 @@ export class DepthEditor {
     this.matte = toGray(m, this.w, this.h);
     this.focus = new Float32Array(this.w * this.h);
     this.edited = new Float32Array(this.w * this.h);
-    this.anchors = {};
     this.settings = { ...DEFAULT_SETTINGS };
+    // auto subject plane = median depth under the matte (fallback: mid of the range)
+    let sum = 0;
+    let cnt = 0;
+    let mn = 1;
+    let mx = 0;
+    for (let i = 0; i < this.w * this.h; i++) {
+      const dv = this.rawDepth[i];
+      if (dv < mn) mn = dv;
+      if (dv > mx) mx = dv;
+      if (this.matte[i] > 0.5) {
+        sum += dv;
+        cnt++;
+      }
+    }
+    this.subjectDepth = cnt > 0 ? sum / cnt : (mn + mx) / 2;
     this.recompute();
   }
 
-  sampleRaw(nx: number, ny: number): number {
-    const x = clampIdx(Math.round(nx * (this.w - 1)), 0, this.w - 1);
-    const y = clampIdx(Math.round(ny * (this.h - 1)), 0, this.h - 1);
-    return this.rawDepth[y * this.w + x];
-  }
-
-  setAnchor(name: AnchorName, nx: number, ny: number): void {
-    this.anchors[name] = this.sampleRaw(nx, ny);
-    this.recompute();
-  }
   setSettings(s: DepthSettings): void {
     this.settings = s;
     this.recompute();
   }
 
-  /** Anchor depths, filling in sensible defaults from the raw map + matte. */
-  private resolvedAnchors(): { s: number; f: number; b: number } {
-    let subjSum = 0;
-    let subjN = 0;
-    let mn = 1;
-    let mx = 0;
-    for (let i = 0; i < this.w * this.h; i++) {
-      const d = this.rawDepth[i];
-      if (d < mn) mn = d;
-      if (d > mx) mx = d;
-      if (this.matte[i] > 0.5) {
-        subjSum += d;
-        subjN++;
-      }
-    }
-    const autoS = subjN > 0 ? subjSum / subjN : (mn + mx) / 2;
-    const s = this.anchors.subject ?? autoS;
-    let f = this.anchors.foreground ?? mx; // nearest
-    let b = this.anchors.background ?? mn; // farthest
-    f = Math.max(f, s + 1e-3);
-    b = Math.min(b, s - 1e-3);
-    return { s, f, b };
-  }
-
   private recompute(): void {
     const n = this.w * this.h;
-    const { s, f, b } = this.resolvedAnchors();
-    const sep = 1 + this.settings.separation * 2.2;
+    const { amount, position, contrast, falloff } = this.settings;
 
-    // 1) background focus field — the falloff for everything OUTSIDE the subject. Separation and
-    //    smoothing act here only, so the subject (forced white below) is never touched.
+    // focal plane: position slides the sharp band through depth (0.5 = the subject's own plane)
+    const s = clamp01(this.subjectDepth + (position - 0.5) * 0.9);
+    // width of the in-focus band: more "amount" → narrower band → stronger separation
+    const width = 0.9 - amount * 0.78; // 0.9 (soft) → 0.12 (hard)
+    const cGain = 1 + contrast * 3; // levels curve steepness
+
+    // 1) background focus field (everything OUTSIDE the subject). Triangular falloff around s,
+    //    then a levels curve. Subject is forced white in step 3, so this never touches it.
     const bgf = new Float32Array(n);
     for (let i = 0; i < n; i++) {
       const d = this.rawDepth[i];
-      let v = d >= s ? 1 - (d - s) / Math.max(f - s, 1e-3) : 1 - (s - d) / Math.max(s - b, 1e-3);
+      let v = 1 - Math.abs(d - s) / Math.max(width, 1e-3);
       v = clamp01(v);
-      bgf[i] = clamp01(0.5 + (v - 0.5) * sep); // separation steepens the fg↔bg split (bg only)
+      v = clamp01(0.5 + (v - 0.5) * cGain); // contrast: darks darker, lights lighter
+      bgf[i] = v;
     }
 
-    // 2) smoothing — a matte-EXCLUDING blur so the subject's white never bleeds into the gradient;
-    //    it only blends foreground↔background.
-    if (this.settings.smoothing > 0.001) {
-      const r = Math.max(1, Math.round(this.settings.smoothing * Math.max(this.w, this.h) * 0.06));
+    // 2) falloff — feather the gradient with a matte-EXCLUDING blur so the subject's white can't
+    //    bleed into the surround; it only softens the foreground↔background transition.
+    if (falloff > 0.001) {
+      const r = Math.max(1, Math.round(falloff * Math.max(this.w, this.h) * 0.06));
       const wmap = new Float32Array(n);
       const wbgf = new Float32Array(n);
       for (let i = 0; i < n; i++) {
-        const w = 1 - this.matte[i]; // background weight
-        wmap[i] = w;
-        wbgf[i] = bgf[i] * w;
+        const wt = 1 - this.matte[i];
+        wmap[i] = wt;
+        wbgf[i] = bgf[i] * wt;
       }
       const num = boxBlur(wbgf, this.w, this.h, r);
       const den = boxBlur(wmap, this.w, this.h, r);
-      const a = this.settings.smoothing;
       for (let i = 0; i < n; i++) {
-        const sm = den[i] > 1e-3 ? num[i] / den[i] : bgf[i];
-        bgf[i] = bgf[i] * (1 - a) + sm * a;
+        bgf[i] = den[i] > 1e-3 ? num[i] / den[i] : bgf[i];
       }
     }
 
-    // 3) blend: the subject (matte) is always in focus (white); the rest uses the falloff.
+    // 3) blend: subject (matte) always in focus (white); the rest uses the falloff field.
+    //    Export map centers the subject at 0.5, with near→1 / far→0 for occlusion ordering.
     for (let i = 0; i < n; i++) {
       const mt = this.matte[i];
       const fo = clamp01(mt + (1 - mt) * bgf[i]);
@@ -180,7 +179,7 @@ export class DepthEditor {
     }
   }
 
-  /** Paint the focus map (white = in focus) for the Depth view. */
+  /** Paint the focus map (white = in focus) for the live Depth preview. */
   drawFocus(canvas: HTMLCanvasElement): void {
     canvas.width = this.w;
     canvas.height = this.h;
