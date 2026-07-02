@@ -62,12 +62,23 @@ def fetch_lama() -> None:
         torch.jit.load = orig
 
 
+SAM2_MODEL_ID = os.environ.get("LENSY_SAM2_MODEL", "facebook/sam2.1-hiera-large")
+
+
+def fetch_sam2() -> None:
+    from transformers import Sam2Model, Sam2Processor
+
+    Sam2Model.from_pretrained(SAM2_MODEL_ID)
+    Sam2Processor.from_pretrained(SAM2_MODEL_ID)
+
+
 def main() -> int:
     print("Pre-caching model weights into backend/models/ …")
     results = {
         "BiRefNet (matte)": _try("BiRefNet", fetch_birefnet),
         "Depth Anything V2 (depth)": _try("Depth Anything V2", fetch_depth),
         "LaMa (inpaint)": _try("LaMa", fetch_lama),
+        "SAM2 (object select)": _try("SAM2", fetch_sam2),
     }
     have = sum(results.values())
     print(f"\nCached {have}/{len(results)} model(s). Missing ones fall back automatically.")

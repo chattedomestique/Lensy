@@ -79,8 +79,52 @@ export async function analyze(file: File): Promise<{ analyzeId: string; width: n
   return { analyzeId: d.analyze_id as string, width: d.width as number, height: d.height as number };
 }
 
-export const depthUrl = (analyzeId: string) => apiUrl(`/analyze/${analyzeId}/depth.png`);
-export const matteUrl = (analyzeId: string) => apiUrl(`/analyze/${analyzeId}/matte.png`);
+export const depthUrl = (analyzeId: string, v = 0) =>
+  apiUrl(`/analyze/${analyzeId}/depth.png${v ? `?v=${v}` : ""}`);
+export const matteUrl = (analyzeId: string, v = 0) =>
+  apiUrl(`/analyze/${analyzeId}/matte.png${v ? `?v=${v}` : ""}`);
+export const photoUrl = (analyzeId: string, v = 0) =>
+  apiUrl(`/analyze/${analyzeId}/photo.jpg${v ? `?v=${v}` : ""}`);
+
+/** Tap-to-select an object → mask image (grayscale, white = object) at working resolution.
+ * points: [[nx, ny, label]] normalized 0..1, label 1 = include, 0 = exclude. */
+export async function segment(
+  analyzeId: string,
+  points: [number, number, number][],
+  box?: [number, number, number, number],
+): Promise<HTMLImageElement> {
+  const form = new FormData();
+  form.append("analyze_id", analyzeId);
+  form.append("points", JSON.stringify(points));
+  if (box) form.append("box", JSON.stringify(box));
+  const r = await fetch(apiUrl("/segment"), { method: "POST", body: form });
+  if (!r.ok) {
+    const b = await r.json().catch(() => ({}));
+    throw new ApiError(b?.error?.message ?? `could not select (${r.status})`);
+  }
+  const url = URL.createObjectURL(await r.blob());
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  await new Promise<void>((res, rej) => {
+    img.onload = () => res();
+    img.onerror = () => rej(new ApiError("selection mask failed to load"));
+    img.src = url;
+  });
+  URL.revokeObjectURL(url);
+  return img;
+}
+
+/** Erase the masked region on the source and re-derive matte + depth. Resolves when done. */
+export async function eraseObject(analyzeId: string, maskPng: Blob): Promise<void> {
+  const form = new FormData();
+  form.append("analyze_id", analyzeId);
+  form.append("mask", maskPng, "mask.png");
+  const r = await fetch(apiUrl("/erase"), { method: "POST", body: form });
+  if (!r.ok) {
+    const b = await r.json().catch(() => ({}));
+    throw new ApiError(b?.error?.message ?? `could not erase (${r.status})`);
+  }
+}
 
 function appendParams(form: FormData, params: RenderParams): void {
   form.append("k", String(params.k));

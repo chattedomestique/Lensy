@@ -26,7 +26,8 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from PIL import Image, ImageOps
 
-from .pipeline import RenderParams, analyze, precompose, render_from, run_pipeline
+from .pipeline import RenderParams, analyze, erase, precompose, render_from, run_pipeline
+from .pipeline.segment import segment_at
 
 log = logging.getLogger("lensy.api")
 router = APIRouter()
@@ -167,6 +168,79 @@ async def analyze_photo_img(aid: str) -> Response:
     if a is None:
         raise HTTPException(status_code=404, detail="unknown analysis")
     return Response(content=_encode_jpeg(a.work, icc=a.icc), media_type="image/jpeg")
+
+
+# ------------------------------ erase (object removal) -----------------------------
+
+
+@router.post("/segment")
+async def segment(
+    request: Request,
+    analyze_id: str = Form(...),
+    points: str = Form("[]"),   # JSON [[nx, ny, label], …] normalized 0..1; label 1=include 0=exclude
+    box: str = Form(""),        # JSON [nx1, ny1, nx2, ny2] normalized (optional)
+) -> Response:
+    """Tap-to-select: return a mask (PNG, white = object) for the tapped point via SAM2."""
+    bundle = getattr(request.app.state, "bundle", None)
+    if bundle is None:
+        return _friendly(503, "warming", "Models are still loading — try again in a moment.")
+    a = _ANALYSES.get(analyze_id)
+    if a is None:
+        return _friendly(404, "unknown_analysis", "That analysis expired — re-add the photo.")
+    h, w = a.work.shape[:2]
+    try:
+        pts = json.loads(points) or []
+        points_xy = [(float(p[0]) * w, float(p[1]) * h) for p in pts]
+        labels = [int(p[2]) if len(p) > 2 else 1 for p in pts]
+        bx = None
+        if box:
+            b = json.loads(box)
+            bx = (float(b[0]) * w, float(b[1]) * h, float(b[2]) * w, float(b[3]) * h)
+    except Exception as e:  # noqa: BLE001
+        return _friendly(400, "bad_prompt", f"could not read selection: {e}")
+
+    loop = asyncio.get_running_loop()
+    mask = await loop.run_in_executor(None, segment_at, a.work, points_xy, labels, bx, bundle)
+    return Response(content=_encode_png_gray(mask.astype(np.float32) / 255.0), media_type="image/png")
+
+
+@router.post("/erase")
+async def erase_object(
+    request: Request,
+    analyze_id: str = Form(...),
+    mask: UploadFile = File(...),  # grayscale PNG, white = erase
+) -> JSONResponse:
+    """Fill the masked region plausibly (LaMa) and re-derive matte + depth on the cleaned image.
+    The analysis is updated in place; the client then reloads depth/matte/photo and re-renders."""
+    bundle = getattr(request.app.state, "bundle", None)
+    if bundle is None:
+        return _friendly(503, "warming", "Models are still loading — try again in a moment.")
+    a = _ANALYSES.get(analyze_id)
+    if a is None:
+        return _friendly(404, "unknown_analysis", "That analysis expired — re-add the photo.")
+    raw = await mask.read()
+    if not raw:
+        return _friendly(400, "empty_mask", "No mask received.")
+    h, w = a.work.shape[:2]
+    try:
+        m01 = _decode_gray(raw, (w, h))
+    except Exception as e:  # noqa: BLE001
+        return _friendly(400, "bad_mask", f"could not read mask: {e}")
+    if float(m01.max()) < 0.5:
+        return _friendly(400, "empty_mask", "Nothing was selected to erase.")
+
+    mask_u8 = (np.clip(m01, 0, 1) * 255).astype(np.uint8)
+    params = RenderParams(working_res=max(h, w))  # already at working res — don't downscale
+    loop = asyncio.get_running_loop()
+    try:
+        cleaned, alpha, depth = await loop.run_in_executor(None, erase, a.work, params, bundle, mask_u8)
+    except Exception as e:  # noqa: BLE001
+        log.exception("erase failed")
+        return _friendly(500, "erase_failed", f"{e.__class__.__name__}: {e}")
+    a.work, a.alpha, a.depth = cleaned, alpha, depth
+    a.fg = None  # invalidate the precompose cache — the scene changed
+    a.clean_bg = None
+    return JSONResponse({"ok": True, "width": w, "height": h})
 
 
 # ----------------------------------- render ----------------------------------------

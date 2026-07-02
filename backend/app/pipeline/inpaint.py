@@ -38,13 +38,37 @@ def fill_background(rgb_u8: np.ndarray, alpha: np.ndarray, bundle: ModelBundle) 
 # ever seen *blurred* and *behind* the sharp subject, so a reduced-res fill is invisible in
 # the final image — we cap LaMa's working long-edge and upscale the result. Big speedup.
 _LAMA_MAX_EDGE = int(os.environ.get("LENSY_LAMA_MAX_EDGE", "768"))
+# The user-facing "erase an object" fill is seen SHARP (not blurred behind the subject), so it
+# runs at a higher resolution than the background plate — quality matters more than speed here.
+_ERASE_MAX_EDGE = int(os.environ.get("LENSY_ERASE_MAX_EDGE", "1536"))
 
 
-def _lama_fill(rgb_u8: np.ndarray, hole_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
+def erase_region(rgb_u8: np.ndarray, mask_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
+    """Remove whatever the mask covers (white = erase) and fill it plausibly. Used by the
+    interactive object-removal tool, so the fill is kept high-res. Returns uint8 RGB."""
+    h, w = rgb_u8.shape[:2]
+    grow = max(3, (min(h, w) // 200) | 1)  # small grow so no rim of the object survives
+    hole = cv2.dilate(
+        (mask_u8 > 127).astype(np.uint8) * 255,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)),
+    )
+    if int((hole > 0).sum()) == 0:
+        return rgb_u8
+    if bundle.inpaint_model is not None:
+        try:
+            return _lama_fill(rgb_u8, hole, bundle, max_edge=_ERASE_MAX_EDGE)
+        except Exception as e:
+            log.warning("LaMa erase failed (%s); using cv2.inpaint fallback", e.__class__.__name__)
+    return _cv2_fill(rgb_u8, hole)
+
+
+def _lama_fill(
+    rgb_u8: np.ndarray, hole_u8: np.ndarray, bundle: ModelBundle, max_edge: int = _LAMA_MAX_EDGE
+) -> np.ndarray:
     from PIL import Image
 
     h, w = rgb_u8.shape[:2]
-    scale = min(1.0, _LAMA_MAX_EDGE / float(max(h, w)))
+    scale = min(1.0, max_edge / float(max(h, w)))
     if scale < 1.0:
         sw, sh = max(1, round(w * scale)), max(1, round(h * scale))
         small = cv2.resize(rgb_u8, (sw, sh), interpolation=cv2.INTER_AREA)

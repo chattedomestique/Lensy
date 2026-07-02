@@ -17,6 +17,9 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 # keep every HF / torch download inside backend/models (git-ignored)
 os.environ.setdefault("HF_HOME", str(MODELS_DIR / "hf"))
 os.environ.setdefault("TORCH_HOME", str(MODELS_DIR / "torch"))
+# SAM2 has a few ops without Metal kernels — let them fall back to CPU rather than crash (must be
+# set before torch is imported).
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 
 def pick_device() -> str:
@@ -45,6 +48,8 @@ class ModelBundle:
     depth_metric: bool = False               # True = model outputs metric depth (invert for disparity)
     depth_name: str = "depth"
     inpaint_model: object | None = None      # LaMa
+    sam2_model: object | None = None         # Segment Anything 2 (interactive object select)
+    sam2_processor: object | None = None
     has_pymatting: bool = False              # estimate_foreground_ml available
     notes: list[str] = field(default_factory=list)
 
@@ -54,6 +59,7 @@ class ModelBundle:
             "matte": "birefnet" if self.matte_model else "fallback(grabcut)",
             "depth": self.depth_name if self.depth_model else "fallback(radial)",
             "inpaint": "lama" if self.inpaint_model else "fallback(cv2)",
+            "segment": "sam2" if self.sam2_model else "fallback(grabcut)",
             "decontaminate": "pymatting" if self.has_pymatting else "fallback(passthrough)",
             "notes": self.notes,
         }
@@ -94,6 +100,13 @@ def load_bundle() -> ModelBundle:
     except Exception as e:
         b.notes.append(f"LaMa unavailable ({e.__class__.__name__}); inpaint = cv2.inpaint fallback")
         log.info("LaMa not loaded: %s", e)
+
+    # --- SAM2 interactive segmentation (optional; GrabCut-around-point is the fallback) ---
+    try:
+        b.sam2_model, b.sam2_processor = _load_sam2(b.device)
+    except Exception as e:
+        b.notes.append(f"SAM2 unavailable ({e.__class__.__name__}); segment = grabcut fallback")
+        log.info("SAM2 not loaded: %s", e)
 
     log.info("Model bundle ready: %s", b.status())
     return b
@@ -151,6 +164,23 @@ def _load_depth(device: str):
         processor = AutoImageProcessor.from_pretrained(_DEPTH_MODEL_ID)
         model = AutoModelForDepthEstimation.from_pretrained(_DEPTH_MODEL_ID)
     model.to(device).float().eval()
+    return model, processor
+
+
+# SAM2 (Segment Anything 2.1) for tap-to-select object removal. `-large` is only ~900MB and the
+# expensive image-embed runs once per photo, so per-click latency stays low. Override with
+# LENSY_SAM2_MODEL (…-base-plus / -small / -tiny to trim RAM).
+_SAM2_MODEL_ID = os.environ.get("LENSY_SAM2_MODEL", "facebook/sam2.1-hiera-large")
+
+
+def _load_sam2(device: str):
+    """SAM2 image predictor via transformers Sam2Model + Sam2Processor. Load then .to(device)
+    explicitly (device_map='auto' is a CUDA idiom); float32 on MPS."""
+    from transformers import Sam2Model, Sam2Processor
+
+    model = Sam2Model.from_pretrained(_SAM2_MODEL_ID)
+    model.to(device).float().eval()
+    processor = Sam2Processor.from_pretrained(_SAM2_MODEL_ID)
     return model, processor
 
 

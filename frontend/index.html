@@ -47,12 +47,13 @@
 
         <img id="result" class="stage-img hidden" alt="Your photo" />
         <canvas id="depthview" class="stage-img hidden"></canvas>
+        <canvas id="erase-layer" class="stage-img erase-layer hidden"></canvas>
 
         <!-- big finger-drag slider overlay -->
         <div id="drag-surface" class="drag-surface hidden">
           <div id="tool-idle" class="tool-idle">
             <div id="tool-label" class="tool-label">Depth amount</div>
-            <div class="tool-hint">hold &amp; drag up or down to adjust</div>
+            <div id="tool-hint" class="tool-hint">hold &amp; drag up or down to adjust</div>
           </div>
           <div id="ticker" class="ticker" aria-hidden="true"></div>
         </div>

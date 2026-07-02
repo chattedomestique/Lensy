@@ -17,6 +17,8 @@ export default defineConfig({
     proxy: {
       "/render": { target: BACKEND, changeOrigin: true },
       "/analyze": { target: BACKEND, changeOrigin: true },
+      "/segment": { target: BACKEND, changeOrigin: true },
+      "/erase": { target: BACKEND, changeOrigin: true },
       "/healthz": { target: BACKEND, changeOrigin: true },
     },
   },

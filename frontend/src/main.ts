@@ -10,11 +10,15 @@ import {
   type RenderParams,
   analyze,
   depthUrl,
+  eraseObject,
   matteUrl,
+  photoUrl,
   renderFromAnalyze,
+  segment,
   type RenderHandle,
 } from "./api";
 import { DepthEditor } from "./depth";
+import { EraseSelection } from "./erase";
 import { setupServerPanel } from "./server";
 
 registerSW({ immediate: true });
@@ -29,6 +33,7 @@ const resultImg = $("result") as HTMLImageElement;
 const depthView = $("depthview") as HTMLCanvasElement;
 const dragSurface = $("drag-surface");
 const toolLabel = $("tool-label");
+const toolHint = $("tool-hint");
 const ticker = $("ticker");
 const subrow = $("subrow");
 const tabbar = $("tabbar");
@@ -65,6 +70,7 @@ interface Tool {
   label: string;
   params: { key: Key; label: string }[];
   shapes?: boolean; // Bokeh shows an aperture-shape picker
+  erase?: boolean; // object-removal mode (tap/brush select + erase), not a drag effect
 }
 
 const TOOLS: Tool[] = [
@@ -95,6 +101,7 @@ const TOOLS: Tool[] = [
       { key: "sweetSize", label: "Spot size" },
     ],
   },
+  { id: "erase", label: "Erase", params: [], erase: true },
 ];
 
 let activeTool = TOOLS[0];
@@ -102,11 +109,16 @@ let activeKey: Key = "amount";
 
 // ---- runtime ----
 const editor = new DepthEditor();
+const eraseSel = new EraseSelection();
+const eraseLayer = $("erase-layer") as HTMLCanvasElement;
 let currentFile: File | null = null;
 let originalUrl: string | null = null;
 let resultUrl: string | null = null;
 let resultBlob: Blob | null = null;
 let analyzeId: string | null = null;
+let analyzeW = 0;
+let analyzeH = 0;
+let dataVersion = 0; // bumped after an erase so depth/matte/photo re-fetch past the cache
 let inflight: RenderHandle | null = null;
 let renderTimer: number | undefined;
 let rafPending = false;
@@ -183,7 +195,7 @@ function buildTabs(): void {
 
 function selectTool(t: Tool): void {
   activeTool = t;
-  activeKey = t.params[0].key;
+  activeKey = t.params[0]?.key ?? activeKey;
   tabbar.querySelectorAll<HTMLButtonElement>(".tab").forEach((b) =>
     b.setAttribute("aria-selected", String(b.dataset.tool === t.id)),
   );
@@ -191,13 +203,33 @@ function selectTool(t: Tool): void {
   updateOverlayLabel();
   // switching tools brings the floating instructions back
   dragSurface.classList.remove("dismissed", "dragging");
-  // depth tool → show the live focus map; lens tools → show the current result
-  if (t.id === "depth") showDepthLive();
-  else hideDepthLive();
+  if (t.erase) {
+    enterEraseMode();
+  } else {
+    eraseLayer.classList.add("hidden");
+    // depth tool → show the live focus map; lens tools → show the current result
+    if (t.id === "depth") showDepthLive();
+    else hideDepthLive();
+  }
+}
+
+function enterEraseMode(): void {
+  if (!analyzeId) return;
+  // select on the cleaned source photo (not the blurred render)
+  resultImg.src = photoUrl(analyzeId, dataVersion);
+  resultImg.classList.remove("hidden");
+  depthView.classList.add("hidden");
+  eraseSel.init(analyzeW, analyzeH, eraseLayer);
+  eraseLayer.classList.remove("hidden");
 }
 
 function buildSubrow(): void {
   subrow.innerHTML = "";
+  if (activeTool.erase) {
+    buildEraseActions();
+    subrow.classList.remove("hidden");
+    return;
+  }
   const multi = activeTool.params.length > 1;
   for (const p of activeTool.params) {
     const chip = document.createElement("button");
@@ -241,16 +273,36 @@ function buildShapeChips(): void {
 }
 
 function updateOverlayLabel(): void {
+  if (activeTool.erase) {
+    toolLabel.textContent = "Erase";
+    toolHint.textContent = "tap an object, or brush over it, then Erase";
+    return;
+  }
   const p = activeTool.params.find((x) => x.key === activeKey)!;
   toolLabel.textContent = p.label;
+  toolHint.textContent = "hold & drag up or down to adjust";
   setTicker(state[activeKey]);
 }
 
 // ---- the big drag slider ----
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const BRUSH_FRAC = 0.035; // brush radius as a fraction of the image's long edge
+
 let dragging = false;
 let moved = false;
+let dragStartX = 0;
 let dragStartY = 0;
 let dragStartVal = 0;
+let strokePainted = false;
+
+/** Normalized coords within the displayed image (clamped). */
+function normOf(e: PointerEvent): { nx: number; ny: number } {
+  const rect = resultImg.getBoundingClientRect();
+  return {
+    nx: clamp01((e.clientX - rect.left) / Math.max(1, rect.width)),
+    ny: clamp01((e.clientY - rect.top) / Math.max(1, rect.height)),
+  };
+}
 
 function bindDrag(): void {
   dragSurface.style.touchAction = "none";
@@ -259,6 +311,8 @@ function bindDrag(): void {
     e.preventDefault();
     dragging = true;
     moved = false;
+    strokePainted = false;
+    dragStartX = e.clientX;
     dragStartY = e.clientY;
     dragStartVal = state[activeKey];
     // touching the image dismisses the floating instructions so the photo is unobstructed
@@ -268,17 +322,25 @@ function bindDrag(): void {
     } catch {
       /* fine */
     }
-    setTicker(state[activeKey]);
+    if (!activeTool.erase) setTicker(state[activeKey]);
   });
+
   dragSurface.addEventListener("pointermove", (e) => {
     if (!dragging) return;
+    if (!moved && Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) > 3) moved = true;
+
+    if (activeTool.erase) {
+      if (!moved) return; // a drag = brush; a still tap = SAM2 select (on pointerup)
+      const { nx, ny } = normOf(e);
+      eraseSel.paint(nx, ny, BRUSH_FRAC, !strokePainted);
+      strokePainted = true;
+      return;
+    }
+
     // drag up = increase. Full 0→100 sweep over ~65% of the stage height.
     const span = Math.max(180, stage.clientHeight * 0.65);
     const delta = ((dragStartY - e.clientY) / span) * 100;
-    if (!moved && Math.abs(e.clientY - dragStartY) > 3) {
-      moved = true;
-      dragSurface.classList.add("dragging"); // reveal the odometer only once we actually drag
-    }
+    if (moved) dragSurface.classList.add("dragging"); // reveal the odometer once we actually drag
     if (!moved) return;
     const v = Math.min(100, Math.max(0, dragStartVal + delta));
     state[activeKey] = v;
@@ -292,15 +354,73 @@ function bindDrag(): void {
       });
     }
   });
-  const end = () => {
+
+  const end = (e: PointerEvent) => {
     if (!dragging) return;
     dragging = false;
     dragSurface.classList.remove("dragging"); // hide the odometer; label stays dismissed
+    if (activeTool.erase) {
+      if (!moved) void tapSelect(normOf(e)); // a still tap selects the object under the finger
+      moved = false;
+      return;
+    }
     if (moved) scheduleRender();
     moved = false;
   };
   dragSurface.addEventListener("pointerup", end);
   dragSurface.addEventListener("pointercancel", end);
+}
+
+// ---- erase (object removal) ----
+function buildEraseActions(): void {
+  const mk = (label: string, cls: string, on: () => void) => {
+    const b = document.createElement("button");
+    b.className = `chip ${cls}`;
+    b.textContent = label;
+    b.addEventListener("click", on);
+    return b;
+  };
+  subrow.appendChild(mk("Undo", "", () => eraseSel.undo()));
+  subrow.appendChild(mk("Clear", "", () => eraseSel.clear()));
+  subrow.appendChild(mk("Erase", "erase-go", () => void doErase()));
+}
+
+async function tapSelect(p: { nx: number; ny: number }): Promise<void> {
+  if (!analyzeId) return;
+  setProgress("Selecting…");
+  try {
+    const img = await segment(analyzeId, [[p.nx, p.ny, 1]]);
+    eraseSel.addMaskImage(img);
+  } catch (err) {
+    toast(err instanceof ApiError ? err.message : "Couldn't select that.");
+  } finally {
+    setProgress("", false);
+  }
+}
+
+async function doErase(): Promise<void> {
+  if (!analyzeId || eraseSel.isEmpty()) {
+    toast("Tap or brush what you want to remove first.");
+    return;
+  }
+  inflight?.cancel();
+  setProgress("Erasing…");
+  try {
+    const mask = await eraseSel.exportPng();
+    await eraseObject(analyzeId, mask);
+    dataVersion++;
+    // the scene changed — reload depth/matte and the cleaned source photo
+    await editor.load(depthUrl(analyzeId, dataVersion), matteUrl(analyzeId, dataVersion));
+    editor.setSettings(depthSettings());
+    resultImg.src = photoUrl(analyzeId, dataVersion);
+    eraseSel.init(analyzeW, analyzeH, eraseLayer); // reset selection for more removals
+    setProgress("", false);
+    void doRender(); // refresh the cached render behind the scenes
+    toast("Erased. Select more, or switch tools to style it.");
+  } catch (err) {
+    setProgress("", false);
+    toast(err instanceof ApiError ? err.message : "Erase failed.");
+  }
 }
 
 // ---- params ----
@@ -355,8 +475,13 @@ async function doRender(): Promise<void> {
     if (resultUrl) URL.revokeObjectURL(resultUrl);
     resultUrl = url;
     resultBlob = await (await fetch(url)).blob();
-    if (activeTool.id !== "depth") showResult(url);
-    else resultImg.src = url; // keep it ready behind the live depth view
+    if (activeTool.erase) {
+      /* keep the cleaned source shown for selecting; result stays cached for save/other tabs */
+    } else if (activeTool.id === "depth") {
+      resultImg.src = url; // keep it ready behind the live depth view
+    } else {
+      showResult(url);
+    }
     setProgress("", false);
     saveBtn.classList.remove("hidden");
     compareBtn.classList.remove("hidden");
@@ -380,10 +505,12 @@ async function acceptFile(file: File): Promise<void> {
   if (originalUrl) URL.revokeObjectURL(originalUrl);
   originalUrl = URL.createObjectURL(file);
   analyzeId = null;
+  dataVersion = 0;
   resultImg.src = originalUrl;
   resultImg.classList.remove("hidden");
   dropzone.classList.add("hidden");
   depthView.classList.add("hidden");
+  eraseLayer.classList.add("hidden");
   dragSurface.classList.add("hidden");
   saveBtn.classList.add("hidden");
   compareBtn.classList.add("hidden");
@@ -393,8 +520,10 @@ async function acceptFile(file: File): Promise<void> {
 
   setProgress("Reading depth…");
   try {
-    const { analyzeId: aid } = await analyze(file);
+    const { analyzeId: aid, width, height } = await analyze(file);
     analyzeId = aid;
+    analyzeW = width;
+    analyzeH = height;
     await editor.load(depthUrl(aid), matteUrl(aid));
     editor.setSettings(depthSettings());
     setProgress("", false);

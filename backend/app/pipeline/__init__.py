@@ -106,6 +106,14 @@ def analyze(rgb_u8: np.ndarray, params: RenderParams, bundle: ModelBundle):
     return work, alpha.astype(np.float32), depth_norm.astype(np.float32)
 
 
+def erase(work: np.ndarray, params: RenderParams, bundle: ModelBundle, mask_u8: np.ndarray):
+    """Object removal: fill the masked region (white = erase) plausibly, then re-derive matte +
+    depth on the cleaned image (removing something changes the scene). Returns the same tuple as
+    analyze(): (cleaned_work, alpha, depth_norm). Caller must drop any cached fg/clean_bg."""
+    cleaned = _inpaint.erase_region(work, mask_u8, bundle)
+    return analyze(cleaned, params, bundle)
+
+
 def precompose(work: np.ndarray, alpha: np.ndarray, bundle: ModelBundle):
     """The slow, depth-independent stages: decontaminate F + inpaint the background. Cached after
     the first render so every later slider edit reuses them (render_from is then ~2-3s)."""

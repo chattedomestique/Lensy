@@ -132,6 +132,7 @@ html, body {
   display: block;
 }
 canvas.stage-img { image-rendering: auto; }
+.erase-layer { pointer-events: none; }
 
 /* dropzone (empty state) */
 .dropzone {
@@ -260,6 +261,12 @@ canvas.stage-img { image-rendering: auto; }
 }
 .shapes { display: flex; gap: var(--s1); margin-left: auto; }
 .chip.shape { min-width: 34px; text-align: center; padding: 7px 8px; }
+/* the erase action is the one deliberate primary — a small accent-filled chip, pushed to the right */
+.chip.erase-go {
+  margin-left: auto; color: var(--accent-ink);
+  background: var(--accent); border-color: var(--accent); font-weight: 600;
+}
+.chip.erase-go:active { transform: translateY(1px) scale(0.99); }
 
 .tabbar {
   display: flex; gap: 1px;
