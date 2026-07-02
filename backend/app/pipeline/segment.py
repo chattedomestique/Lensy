@@ -48,6 +48,7 @@ def _sam2_mask(rgb_u8, points_xy, labels, box, bundle) -> np.ndarray:
         outputs = model(**inputs, multimask_output=True)  # 3 candidates + IoU scores
     # post_process_masks → [image] of shape (num_objects, num_masks, H, W); take the first object.
     arr = np.asarray(processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])[0])
+    scores = np.asarray(outputs.iou_scores[0, 0].cpu()).ravel()  # read BEFORE freeing outputs
     del inputs, outputs
     if bundle.device == "mps":  # SAM2's embedding is memory-heavy; free it before the next stage
         try:
@@ -58,7 +59,6 @@ def _sam2_mask(rgb_u8, points_xy, labels, box, bundle) -> np.ndarray:
             pass
     while arr.ndim > 3:
         arr = arr[0]  # → (num_masks, H, W)
-    scores = np.asarray(outputs.iou_scores[0, 0].cpu()).ravel()
     cands = [arr[k].astype(bool) for k in range(arr.shape[0])]
 
     # For object *removal* a tap should grab the whole object, not a confident sub-part. Prefer the
@@ -68,6 +68,17 @@ def _sam2_mask(rgb_u8, points_xy, labels, box, bundle) -> np.ndarray:
     usable = [i for i, f in enumerate(frac) if 0.002 < f < 0.85]
     best = max(usable, key=lambda i: frac[i]) if usable else int(np.argmax(scores))
     return (cands[best].astype(np.uint8) * 255)
+
+
+def restrict_matte(matte_full: np.ndarray, sel_u8: np.ndarray) -> np.ndarray:
+    """Keep the soft matte only where the subject was tapped. A generous dilation + soft falloff so
+    hair just outside the SAM2 mask survives (matting quality), while other salient people elsewhere
+    in the frame drop out of the subject and fall back to the depth-blurred background."""
+    h, w = matte_full.shape[:2]
+    grow = max(5, (min(h, w) // 120) | 1)
+    dil = cv2.dilate(sel_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
+    soft = cv2.GaussianBlur(dil.astype(np.float32) / 255.0, (0, 0), sigmaX=max(2.0, grow * 0.5))
+    return np.clip(matte_full.astype(np.float32) * soft, 0.0, 1.0).astype(np.float32)
 
 
 def _grabcut_mask(rgb_u8, points_xy, box) -> np.ndarray:

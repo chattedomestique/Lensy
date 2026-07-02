@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from PIL import Image, ImageOps
 
 from .pipeline import RenderParams, analyze, erase, precompose, render_from, run_pipeline
-from .pipeline.segment import segment_at
+from .pipeline.segment import restrict_matte, segment_at
 
 log = logging.getLogger("lensy.api")
 router = APIRouter()
@@ -56,6 +56,8 @@ class Analysis:
     fg: np.ndarray | None = None        # decontaminated F — computed lazily on the first render
     clean_bg: np.ndarray | None = None  # inpainted background — the slow step, cached after
     icc: bytes | None = None            # source ICC profile (e.g. Display P3), carried to output
+    matte_full: np.ndarray | None = None   # the auto (BiRefNet) matte before subject restriction
+    subject_sel: np.ndarray | None = None  # union of tapped SAM2 subject masks (None = auto matte)
     created: float = field(default_factory=time.time)
 
 
@@ -141,7 +143,9 @@ async def analyze_photo(
 
     _evict(_ANALYSES, _MAX_ANALYSES)
     aid = uuid.uuid4().hex
-    _ANALYSES[aid] = Analysis(id=aid, work=work, alpha=alpha, depth=depth, icc=icc)
+    _ANALYSES[aid] = Analysis(
+        id=aid, work=work, alpha=alpha, depth=depth, icc=icc, matte_full=alpha.copy()
+    )
     h, w = work.shape[:2]
     return JSONResponse({"analyze_id": aid, "width": w, "height": h})
 
@@ -168,6 +172,52 @@ async def analyze_photo_img(aid: str) -> Response:
     if a is None:
         raise HTTPException(status_code=404, detail="unknown analysis")
     return Response(content=_encode_jpeg(a.work, icc=a.icc), media_type="image/jpeg")
+
+
+# ------------------------------ subject (tap to select) ----------------------------
+
+
+@router.post("/subject")
+async def select_subject(
+    request: Request,
+    analyze_id: str = Form(...),
+    points: str = Form("[]"),   # JSON [[nx, ny, label], …]; each tap adds a person to the subject
+    reset: bool = Form(False),  # clear back to the automatic (whole-scene) matte
+) -> JSONResponse:
+    """Restrict the subject to who you tap: SAM2-select that person and keep the soft matte only
+    there, so other salient people (at a different depth) fall back to the blurred background and
+    the focal plane locks to the tapped subject. Tap again to add same-plane subjects."""
+    bundle = getattr(request.app.state, "bundle", None)
+    if bundle is None:
+        return _friendly(503, "warming", "Models are still loading — try again in a moment.")
+    a = _ANALYSES.get(analyze_id)
+    if a is None:
+        return _friendly(404, "unknown_analysis", "That analysis expired — re-add the photo.")
+    h, w = a.work.shape[:2]
+    if a.matte_full is None:
+        a.matte_full = a.alpha.copy()
+
+    if reset:
+        a.subject_sel = None
+        a.alpha = a.matte_full.copy()
+        a.fg = a.clean_bg = None
+        return JSONResponse({"ok": True, "width": w, "height": h})
+
+    try:
+        pts = json.loads(points) or []
+        points_xy = [(float(p[0]) * w, float(p[1]) * h) for p in pts]
+        labels = [int(p[2]) if len(p) > 2 else 1 for p in pts]
+    except Exception as e:  # noqa: BLE001
+        return _friendly(400, "bad_prompt", f"could not read the tap: {e}")
+    if not points_xy:
+        return _friendly(400, "no_point", "Tap a subject to select.")
+
+    loop = asyncio.get_running_loop()
+    sel = await loop.run_in_executor(None, segment_at, a.work, points_xy, labels, None, bundle)
+    a.subject_sel = sel if a.subject_sel is None else np.maximum(a.subject_sel, sel)
+    a.alpha = restrict_matte(a.matte_full, a.subject_sel)
+    a.fg = a.clean_bg = None  # matte changed → decontaminate + inpaint must recompute
+    return JSONResponse({"ok": True, "width": w, "height": h})
 
 
 # ------------------------------ erase (object removal) -----------------------------

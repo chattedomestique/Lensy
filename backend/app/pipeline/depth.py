@@ -61,11 +61,24 @@ def background_depth(disp: np.ndarray, subject_mask: np.ndarray) -> np.ndarray:
 
 
 def _normalize(d: np.ndarray) -> np.ndarray:
+    """Normalize a depth/disparity signal to [0,1]. A plain min/max stretch collapses everything
+    into a sliver when one object is much nearer than the rest (e.g. a pole right by the lens) —
+    then subjects and background people end up numerically ~equal and the DoF can't separate the
+    focal planes. So we blend the linear stretch with a **rank (histogram) equalization**, which
+    spreads the populated depth range perceptually and keeps distinct planes distinct. Kept partly
+    linear so smooth regions don't over-amplify into spurious gradients."""
     d = d.astype(np.float32)
     lo, hi = float(np.percentile(d, 1)), float(np.percentile(d, 99))
     if hi - lo < 1e-6:
         return np.zeros_like(d)
-    return np.clip((d - lo) / (hi - lo), 0.0, 1.0)
+    lin = np.clip((d - lo) / (hi - lo), 0.0, 1.0)
+
+    flat = lin.ravel()
+    order = np.argsort(flat)
+    rank = np.empty(flat.size, np.float32)
+    rank[order] = np.linspace(0.0, 1.0, flat.size, dtype=np.float32)
+    rank = rank.reshape(d.shape)
+    return (0.7 * rank + 0.3 * lin).astype(np.float32)
 
 
 def normalize01(d: np.ndarray) -> np.ndarray:

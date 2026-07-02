@@ -115,6 +115,24 @@ export async function segment(
   return img;
 }
 
+/** Restrict the subject to the tapped person(s) (SAM2), or reset to the automatic matte.
+ * points: [[nx, ny, label]] normalized 0..1. Each call adds a person to the subject. */
+export async function selectSubject(
+  analyzeId: string,
+  points: [number, number, number][],
+  reset = false,
+): Promise<void> {
+  const form = new FormData();
+  form.append("analyze_id", analyzeId);
+  form.append("points", JSON.stringify(points));
+  form.append("reset", String(reset));
+  const r = await fetch(apiUrl("/subject"), { method: "POST", body: form });
+  if (!r.ok) {
+    const b = await r.json().catch(() => ({}));
+    throw new ApiError(b?.error?.message ?? `could not select subject (${r.status})`);
+  }
+}
+
 /** Erase the masked region on the source and re-derive matte + depth. Resolves when done. */
 export async function eraseObject(analyzeId: string, maskPng: Blob): Promise<void> {
   const form = new FormData();

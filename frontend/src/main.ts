@@ -15,6 +15,7 @@ import {
   photoUrl,
   renderFromAnalyze,
   segment,
+  selectSubject,
   type RenderHandle,
 } from "./api";
 import { DepthEditor } from "./depth";
@@ -71,6 +72,7 @@ interface Tool {
   shapes?: boolean; // Bokeh shows an aperture-shape picker
   erase?: boolean; // object-removal mode (tap/brush select + erase), not a drag effect
   refine?: boolean; // spot edge refinement — brush a local depth fix (kills halos)
+  subject?: boolean; // tap to select which person(s) are the subject
 }
 
 const TOOLS: Tool[] = [
@@ -83,6 +85,7 @@ const TOOLS: Tool[] = [
       { key: "falloff", label: "Depth falloff" },
     ],
   },
+  { id: "subject", label: "Subject", params: [], subject: true },
   { id: "bokeh", label: "Bokeh", params: [{ key: "k", label: "Blur" }], shapes: true },
   { id: "bloom", label: "Bloom", params: [{ key: "highlight", label: "Bloom" }] },
   {
@@ -195,6 +198,8 @@ const DOT = '<circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/>
 const ICONS: Record<string, string> = {
   // stacked planes = depth layers
   depth: SVG('<rect x="3.5" y="3.5" width="12" height="12" rx="2.5"/><rect x="8.5" y="8.5" width="12" height="12" rx="2.5"/>'),
+  // person = subject select
+  subject: SVG('<circle cx="12" cy="8" r="3.6"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/>'),
   // out-of-focus bokeh balls
   bokeh: SVG('<circle cx="9" cy="10" r="4.3"/><circle cx="16.5" cy="14.5" r="3"/><circle cx="15.5" cy="7" r="1.8"/>'),
   // highlight starburst
@@ -242,6 +247,8 @@ function selectTool(t: Tool): void {
     enterEraseMode();
   } else if (t.refine) {
     enterRefineMode();
+  } else if (t.subject) {
+    enterSubjectMode();
   } else {
     eraseLayer.classList.add("hidden");
     // depth tool → show the live focus map; lens tools → show the current result
@@ -250,10 +257,17 @@ function selectTool(t: Tool): void {
   }
 }
 
+function enterSubjectMode(): void {
+  // tap the people you want in focus; resultImg already holds the current render — just show it
+  // (don't reassign src: reloading it briefly zeroes the element size and a fast tap would miss)
+  resultImg.classList.remove("hidden");
+  depthView.classList.add("hidden");
+  eraseLayer.classList.add("hidden");
+}
+
 function enterRefineMode(): void {
   if (!editor.ready) return;
   // brush on the rendered photo so the halo is visible; overlay shows what's painted
-  if (resultUrl) resultImg.src = resultUrl;
   resultImg.classList.remove("hidden");
   depthView.classList.add("hidden");
   editor.drawRefineOverlay(eraseLayer);
@@ -279,6 +293,16 @@ function buildSubrow(): void {
   }
   if (activeTool.refine) {
     buildRefineActions();
+    subrow.classList.remove("hidden");
+    return;
+  }
+  if (activeTool.subject) {
+    const reset = document.createElement("button");
+    reset.className = "chip";
+    reset.textContent = "Reset to auto";
+    reset.style.marginLeft = "auto";
+    reset.addEventListener("click", () => void resetSubject());
+    subrow.appendChild(reset);
     subrow.classList.remove("hidden");
     return;
   }
@@ -333,6 +357,11 @@ function updateOverlayLabel(): void {
   if (activeTool.refine) {
     toolLabel.textContent = "Refine";
     toolHint.textContent = "brush over a halo or bad edge to fix it";
+    return;
+  }
+  if (activeTool.subject) {
+    toolLabel.textContent = "Subject";
+    toolHint.textContent = "tap each person you want in focus";
     return;
   }
   const p = activeTool.params.find((x) => x.key === activeKey)!;
@@ -402,6 +431,8 @@ function bindDrag(): void {
       return;
     }
 
+    if (activeTool.subject) return; // tap-only; ignore drags
+
     // drag up = increase. Full 0→100 sweep over ~65% of the stage height.
     const span = Math.max(180, stage.clientHeight * 0.65);
     const delta = ((dragStartY - e.clientY) / span) * 100;
@@ -425,7 +456,14 @@ function bindDrag(): void {
     dragging = false;
     dragSurface.classList.remove("dragging"); // hide the odometer; label stays dismissed
     if (activeTool.erase) {
-      if (!moved) void tapSelect(normOf(e)); // a still tap selects the object under the finger
+      // a still tap selects the object under the finger (guard against a not-yet-laid-out image)
+      if (!moved && resultImg.getBoundingClientRect().width > 4) void tapSelect(normOf(e));
+      moved = false;
+      return;
+    }
+    if (activeTool.subject) {
+      // ignore taps until the image has laid out (a 0-size rect would map to the corner)
+      if (!moved && resultImg.getBoundingClientRect().width > 4) void tapSubject(normOf(e));
       moved = false;
       return;
     }
@@ -492,6 +530,27 @@ function buildRefineActions(): void {
   });
   subrow.appendChild(clear);
 }
+
+async function applySubject(points: [number, number, number][], reset: boolean): Promise<void> {
+  if (!analyzeId) return;
+  inflight?.cancel();
+  setProgress(reset ? "Resetting…" : "Selecting subject…");
+  try {
+    await selectSubject(analyzeId, points, reset);
+    dataVersion++;
+    // matte changed → reload it so the depth editor re-centres focus on the new subject
+    await editor.load(depthUrl(analyzeId, dataVersion), matteUrl(analyzeId, dataVersion));
+    editor.setSettings(depthSettings());
+    setProgress("", false);
+    void doRender();
+  } catch (err) {
+    setProgress("", false);
+    toast(err instanceof ApiError ? err.message : "Couldn't set the subject.");
+  }
+}
+
+const tapSubject = (p: { nx: number; ny: number }) => applySubject([[p.nx, p.ny, 1]], false);
+const resetSubject = () => applySubject([], true);
 
 async function tapSelect(p: { nx: number; ny: number }): Promise<void> {
   if (!analyzeId) return;
