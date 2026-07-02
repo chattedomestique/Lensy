@@ -42,15 +42,32 @@ TUNLOG="$(mktemp -t lensy-tunnel)"
 pids=()
 cleanup() {
   echo; echo "${BOLD}Stopping Lensy…${OFF}"
+  STOPPING=1
   for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  # the auto-restart loop runs uvicorn as a grandchild — free the port so it can't be orphaned
+  lsof -ti tcp:"$PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
   rm -f "$TUNLOG"; wait 2>/dev/null || true
 }
+STOPPING=0
 trap cleanup INT TERM EXIT
 
-# --- backend (production: no --reload) ---
+# --- backend (production: no --reload), supervised so an MPS abort self-heals ---
+# All four models run hot on a 16GB Mac; a transient Metal/OOM abort would otherwise leave the
+# tunnel returning 502 until a manual restart. Respawn on any non-clean exit instead.
 echo "${BOLD}▸ backend${OFF}  http://localhost:${PORT}"
-( cd "$ROOT/backend" && source .venv/bin/activate \
-    && exec uvicorn app.main:app --host 127.0.0.1 --port "$PORT" ) &
+(
+  while [ "$STOPPING" = "0" ]; do
+    set +e  # errexit would kill this supervisor the instant uvicorn exits non-zero (a crash)
+    ( cd "$ROOT/backend" && source .venv/bin/activate \
+        && exec uvicorn app.main:app --host 127.0.0.1 --port "$PORT" )
+    ec=$?
+    set -e
+    # 130 (SIGINT) / 143 (SIGTERM) mean we're shutting down — don't respawn
+    { [ "$ec" = "130" ] || [ "$ec" = "143" ] || [ "$STOPPING" = "1" ]; } && break
+    echo "${BOLD}! backend exited (code ${ec}) — restarting in 2s…${OFF}"
+    sleep 2
+  done
+) &
 pids+=("$!")
 
 for _ in $(seq 1 60); do

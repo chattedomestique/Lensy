@@ -48,6 +48,14 @@ def _sam2_mask(rgb_u8, points_xy, labels, box, bundle) -> np.ndarray:
         outputs = model(**inputs, multimask_output=True)  # 3 candidates + IoU scores
     # post_process_masks → [image] of shape (num_objects, num_masks, H, W); take the first object.
     arr = np.asarray(processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])[0])
+    del inputs, outputs
+    if bundle.device == "mps":  # SAM2's embedding is memory-heavy; free it before the next stage
+        try:
+            import torch as _t
+
+            _t.mps.empty_cache()
+        except Exception:
+            pass
     while arr.ndim > 3:
         arr = arr[0]  # → (num_masks, H, W)
     scores = np.asarray(outputs.iou_scores[0, 0].cpu()).ravel()
