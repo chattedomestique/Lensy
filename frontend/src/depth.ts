@@ -86,14 +86,28 @@ export class DepthEditor {
   private focus: Float32Array = new Float32Array(); // 1 = in focus (white), 0 = max blur
   private edited: Float32Array = new Float32Array(); // subject=0.5, near→1, far→0 (for backend)
   private subjectDepth = 0.5; // auto median depth under the matte
+  // spot refinement: per-pixel local depth override painted by the Refine brush.
+  //   +1 = force in-focus (sharp) — kills foreground occlusion halos
+  //   -1 = force max blur (recede)
+  private refine: Int8Array = new Int8Array();
 
   settings: DepthSettings = { ...DEFAULT_SETTINGS };
 
   get ready(): boolean {
     return this.w > 0;
   }
+  get width(): number {
+    return this.w;
+  }
+  get height(): number {
+    return this.h;
+  }
   get focalValue(): number {
     return 0.5; // subject is mapped to the middle of the edited depth
+  }
+  get hasRefine(): boolean {
+    for (let i = 0; i < this.refine.length; i++) if (this.refine[i]) return true;
+    return false;
   }
 
   async load(depthSrc: string, matteSrc: string, maxEdge = 768): Promise<void> {
@@ -105,6 +119,7 @@ export class DepthEditor {
     this.matte = toGray(m, this.w, this.h);
     this.focus = new Float32Array(this.w * this.h);
     this.edited = new Float32Array(this.w * this.h);
+    this.refine = new Int8Array(this.w * this.h);
     this.settings = { ...DEFAULT_SETTINGS };
     // auto subject plane = median depth under the matte (fallback: mid of the range)
     let sum = 0;
@@ -177,6 +192,73 @@ export class DepthEditor {
       const blur = 1 - fo;
       this.edited[i] = this.rawDepth[i] >= s ? 0.5 + 0.5 * blur : 0.5 - 0.5 * blur;
     }
+
+    // 4) spot refinement overrides (persist across slider edits). +1 → in focus (sharp);
+    //    -1 → max blur, keeping the near/far side so occlusion ordering is preserved.
+    for (let i = 0; i < n; i++) {
+      if (this.refine[i] === 1) {
+        this.focus[i] = 1;
+        this.edited[i] = 0.5;
+      } else if (this.refine[i] === -1) {
+        this.focus[i] = 0;
+        this.edited[i] = this.rawDepth[i] >= s ? 1.0 : 0.0;
+      }
+    }
+  }
+
+  /** Paint a spot refinement (disc, nx/ny normalized). mode: sharpen (+1) / recede (-1) / clear (0). */
+  paintRefine(nx: number, ny: number, radiusFrac: number, mode: "sharpen" | "recede" | "clear"): void {
+    const val = mode === "sharpen" ? 1 : mode === "recede" ? -1 : 0;
+    const cx = nx * this.w;
+    const cy = ny * this.h;
+    const r = Math.max(2, radiusFrac * Math.max(this.w, this.h));
+    const r2 = r * r;
+    const x0 = Math.max(0, Math.floor(cx - r));
+    const x1 = Math.min(this.w - 1, Math.ceil(cx + r));
+    const y0 = Math.max(0, Math.floor(cy - r));
+    const y1 = Math.min(this.h - 1, Math.ceil(cy + r));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        if (dx * dx + dy * dy <= r2) this.refine[y * this.w + x] = val as number;
+      }
+    }
+    // no recompute here — the brush repaints many times per stroke; call commit() on finger-lift
+  }
+
+  /** Recompute the maps after a refinement stroke (call once when the brush lifts). */
+  commit(): void {
+    this.recompute();
+  }
+
+  clearRefine(): void {
+    if (!this.hasRefine) return;
+    this.refine.fill(0);
+    this.recompute();
+  }
+
+  /** Tint the painted refinement regions over the photo (cyan = sharpen, warm = recede). */
+  drawRefineOverlay(canvas: HTMLCanvasElement): void {
+    canvas.width = this.w;
+    canvas.height = this.h;
+    const ctx = canvas.getContext("2d")!;
+    const img = ctx.createImageData(this.w, this.h);
+    for (let i = 0; i < this.w * this.h; i++) {
+      const v = this.refine[i];
+      if (v === 1) {
+        img.data[i * 4] = 111;
+        img.data[i * 4 + 1] = 182;
+        img.data[i * 4 + 2] = 214; // --accent-2 slate/cyan
+        img.data[i * 4 + 3] = 120;
+      } else if (v === -1) {
+        img.data[i * 4] = 207;
+        img.data[i * 4 + 1] = 138;
+        img.data[i * 4 + 2] = 95; // --accent terracotta
+        img.data[i * 4 + 3] = 120;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
   }
 
   /** Paint the focus map (white = in focus) for the live Depth preview. */

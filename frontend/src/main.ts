@@ -71,6 +71,7 @@ interface Tool {
   params: { key: Key; label: string }[];
   shapes?: boolean; // Bokeh shows an aperture-shape picker
   erase?: boolean; // object-removal mode (tap/brush select + erase), not a drag effect
+  refine?: boolean; // spot edge refinement — brush a local depth fix (kills halos)
 }
 
 const TOOLS: Tool[] = [
@@ -101,8 +102,10 @@ const TOOLS: Tool[] = [
       { key: "sweetSize", label: "Spot size" },
     ],
   },
+  { id: "refine", label: "Refine", params: [], refine: true },
   { id: "erase", label: "Erase", params: [], erase: true },
 ];
+let refineMode: "sharpen" | "recede" = "sharpen";
 
 let activeTool = TOOLS[0];
 let activeKey: Key = "amount";
@@ -205,12 +208,24 @@ function selectTool(t: Tool): void {
   dragSurface.classList.remove("dismissed", "dragging");
   if (t.erase) {
     enterEraseMode();
+  } else if (t.refine) {
+    enterRefineMode();
   } else {
     eraseLayer.classList.add("hidden");
     // depth tool → show the live focus map; lens tools → show the current result
     if (t.id === "depth") showDepthLive();
     else hideDepthLive();
   }
+}
+
+function enterRefineMode(): void {
+  if (!editor.ready) return;
+  // brush on the rendered photo so the halo is visible; overlay shows what's painted
+  if (resultUrl) resultImg.src = resultUrl;
+  resultImg.classList.remove("hidden");
+  depthView.classList.add("hidden");
+  editor.drawRefineOverlay(eraseLayer);
+  eraseLayer.classList.remove("hidden");
 }
 
 function enterEraseMode(): void {
@@ -227,6 +242,11 @@ function buildSubrow(): void {
   subrow.innerHTML = "";
   if (activeTool.erase) {
     buildEraseActions();
+    subrow.classList.remove("hidden");
+    return;
+  }
+  if (activeTool.refine) {
+    buildRefineActions();
     subrow.classList.remove("hidden");
     return;
   }
@@ -276,6 +296,11 @@ function updateOverlayLabel(): void {
   if (activeTool.erase) {
     toolLabel.textContent = "Erase";
     toolHint.textContent = "tap an object, or brush over it, then Erase";
+    return;
+  }
+  if (activeTool.refine) {
+    toolLabel.textContent = "Refine";
+    toolHint.textContent = "brush over a halo or bad edge to fix it";
     return;
   }
   const p = activeTool.params.find((x) => x.key === activeKey)!;
@@ -337,6 +362,14 @@ function bindDrag(): void {
       return;
     }
 
+    if (activeTool.refine) {
+      const { nx, ny } = normOf(e); // paint even on a tap-dab, then commit on lift
+      editor.paintRefine(nx, ny, BRUSH_FRAC, refineMode);
+      editor.drawRefineOverlay(eraseLayer);
+      strokePainted = true;
+      return;
+    }
+
     // drag up = increase. Full 0→100 sweep over ~65% of the stage height.
     const span = Math.max(180, stage.clientHeight * 0.65);
     const delta = ((dragStartY - e.clientY) / span) * 100;
@@ -364,6 +397,18 @@ function bindDrag(): void {
       moved = false;
       return;
     }
+    if (activeTool.refine) {
+      if (!strokePainted) {
+        const { nx, ny } = normOf(e); // a tap paints one dab
+        editor.paintRefine(nx, ny, BRUSH_FRAC, refineMode);
+        editor.drawRefineOverlay(eraseLayer);
+      }
+      editor.commit(); // recompute once, then render with the refined depth
+      scheduleRender();
+      moved = false;
+      strokePainted = false;
+      return;
+    }
     if (moved) scheduleRender();
     moved = false;
   };
@@ -383,6 +428,37 @@ function buildEraseActions(): void {
   subrow.appendChild(mk("Undo", "", () => eraseSel.undo()));
   subrow.appendChild(mk("Clear", "", () => eraseSel.clear()));
   subrow.appendChild(mk("Erase", "erase-go", () => void doErase()));
+}
+
+function buildRefineActions(): void {
+  const modes: [typeof refineMode, string][] = [
+    ["sharpen", "Sharpen"],
+    ["recede", "Blur"],
+  ];
+  for (const [m, label] of modes) {
+    const chip = document.createElement("button");
+    chip.className = "chip";
+    chip.textContent = label;
+    chip.dataset.mode = m;
+    chip.setAttribute("aria-pressed", String(m === refineMode));
+    chip.addEventListener("click", () => {
+      refineMode = m;
+      subrow.querySelectorAll<HTMLButtonElement>(".chip[data-mode]").forEach((c) =>
+        c.setAttribute("aria-pressed", String(c.dataset.mode === m)),
+      );
+    });
+    subrow.appendChild(chip);
+  }
+  const clear = document.createElement("button");
+  clear.className = "chip";
+  clear.textContent = "Clear";
+  clear.style.marginLeft = "auto";
+  clear.addEventListener("click", () => {
+    editor.clearRefine();
+    editor.drawRefineOverlay(eraseLayer);
+    scheduleRender();
+  });
+  subrow.appendChild(clear);
 }
 
 async function tapSelect(p: { nx: number; ny: number }): Promise<void> {
