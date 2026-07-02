@@ -51,6 +51,9 @@ class RenderParams:
     halation_size: float = 0.4
     ca: float = 0.0              # lateral chromatic aberration
     distortion: float = 0.0      # barrel lens distortion
+    grain: float = 0.0           # modeled film grain
+    grain_size: float = 0.4
+    grain_seed: float = 0.37     # per-image; set from the analysis so edits don't reroll the grain
     working_res: int = 2048      # long-edge px the pipeline runs at
 
     def blur_params(self, disp_focus: float | None = None) -> BlurParams:
@@ -69,6 +72,9 @@ class RenderParams:
             halation_size=self.halation_size,
             ca=self.ca,
             distortion=self.distortion,
+            grain=self.grain,
+            grain_size=self.grain_size,
+            grain_seed=self.grain_seed,
         )
 
 

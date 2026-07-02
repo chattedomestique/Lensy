@@ -47,12 +47,14 @@ const progressLabel = $("progress-label");
 type Key =
   | "amount" | "position" | "contrast" | "falloff"       // depth (client-side)
   | "k" | "highlight" | "halation" | "halationSize"       // lens (backend)
-  | "ca" | "swirl" | "sweet" | "sweetSize" | "distortion";
+  | "ca" | "swirl" | "sweet" | "sweetSize" | "distortion"
+  | "grain" | "grainSize";
 
 const DEFAULTS: Record<Key, number> = {
   amount: 50, position: 50, contrast: 0, falloff: 20,
   k: 60, highlight: 0, halation: 0, halationSize: 40,
   ca: 0, swirl: 0, sweet: 0, sweetSize: 35, distortion: 0,
+  grain: 0, grainSize: 40,
 };
 const state: Record<Key, number> = { ...DEFAULTS };
 let blades = 0;
@@ -108,6 +110,13 @@ const TOOLS: Tool[] = [
     params: [
       { key: "sweet", label: "Lensbaby" },
       { key: "sweetSize", label: "Spot size" },
+    ],
+  },
+  {
+    id: "grain", label: "Grain",
+    params: [
+      { key: "grain", label: "Grain" },
+      { key: "grainSize", label: "Grain size" },
     ],
   },
   { id: "refine", label: "Refine", params: [], refine: true },
@@ -215,6 +224,8 @@ const ICONS: Record<string, string> = {
   petzval: SVG('<path d="M12 4a8 8 0 1 1-7.6 5.6"/><path d="M12 8.2a3.8 3.8 0 1 0 3.6 2.7"/>'),
   // sweet-spot reticle
   lensbaby: SVG(`<circle cx="12" cy="12" r="8"/>${DOT}`),
+  // film-grain speckle
+  grain: SVG('<circle cx="6" cy="7" r="1.1" fill="currentColor" stroke="none"/><circle cx="12.5" cy="5.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="18" cy="8" r="1.1" fill="currentColor" stroke="none"/><circle cx="8.5" cy="12.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="15" cy="13.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="5.5" cy="17.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="11.5" cy="18.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="17.5" cy="18" r="1.0" fill="currentColor" stroke="none"/>'),
   // refine sparkle
   refine: SVG('<path d="M12 3.5l1.9 4.6L18.5 10l-4.6 1.9L12 16.5l-1.9-4.6L5.5 10l4.6-1.9z"/><path d="M18.5 16.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>'),
   // eraser
@@ -725,6 +736,8 @@ function renderParams(): RenderParams {
     halation_size: state.halationSize / 100,
     ca: backendVal("ca"),
     distortion: backendVal("distortion"),
+    grain: state.grain / 100,
+    grain_size: state.grainSize / 100,
   };
 }
 

@@ -46,6 +46,9 @@ class BlurParams:
     halation_size: float = 0.4 # how far the halation glow spreads
     ca: float = 0.0            # lateral chromatic aberration — colour fringing toward the edges
     distortion: float = 0.0    # barrel lens distortion (paired with CA in the UI)
+    grain: float = 0.0         # modeled film grain amount (0..1, quadratic ramp)
+    grain_size: float = 0.4    # grain cell character: 0 very fine → 1 coarse
+    grain_seed: float = 0.37   # per-image seed so grain is static across slider edits
 
 
 # ---- aperture kernels ---------------------------------------------------------------

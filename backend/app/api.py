@@ -311,7 +311,8 @@ async def erase_object(
 
 def _params_from_form(
     k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
-    swirl, sweet, sweet_size, halation, halation_size, ca, distortion, working_res,
+    swirl, sweet, sweet_size, halation, halation_size, ca, distortion, grain, grain_size,
+    working_res,
 ) -> RenderParams:
     return RenderParams(
         k=float(np.clip(k, 0, 100)),
@@ -329,6 +330,8 @@ def _params_from_form(
         halation_size=float(np.clip(halation_size, 0.05, 1)),
         ca=float(np.clip(ca, 0, 1)),
         distortion=float(np.clip(distortion, 0, 1)),
+        grain=float(np.clip(grain, 0, 1)),
+        grain_size=float(np.clip(grain_size, 0, 1)),
         working_res=int(np.clip(working_res, 512, 4096)),
     )
 
@@ -386,6 +389,8 @@ async def start_render(
     halation_size: float = Form(0.4),
     ca: float = Form(0.0),
     distortion: float = Form(0.0),
+    grain: float = Form(0.0),
+    grain_size: float = Form(0.4),
     working_res: int = Form(2048),
 ) -> JSONResponse:
     bundle = getattr(request.app.state, "bundle", None)
@@ -393,8 +398,11 @@ async def start_render(
         return _friendly(503, "warming", "Models are still loading — try again in a moment.")
     params = _params_from_form(
         k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
-        swirl, sweet, sweet_size, halation, halation_size, ca, distortion, working_res,
+        swirl, sweet, sweet_size, halation, halation_size, ca, distortion, grain, grain_size,
+        working_res,
     )
+    if analyze_id:  # grain is static per image: seed from the analysis id, not per render
+        params.grain_seed = (int(analyze_id[:8], 16) % 9973) / 9973.0
 
     # Path A — render from a prior analysis + (optionally) a hand-edited depth map
     if analyze_id:

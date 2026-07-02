@@ -277,9 +277,13 @@ def _dilate_coc(radius_px: np.ndarray) -> np.ndarray:
     h, w = radius_px.shape[:2]
     win = max(3, (min(h, w) // 90) | 1)  # ~edge-bridging window, not the whole frame
     dil = cv2.dilate(radius_px, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (win, win)))
-    # raise each pixel toward the local max, but only partway, then soften the CoC ramp
+    # raise each pixel toward the local max, but only partway, then smooth the RADIUS map firmly:
+    # noisy depth makes the blur amount patchy (blotchy sharp/blur boundaries that read as lines —
+    # a shadow band on the ground, an awning edge). Smoothing the radius only varies the blur
+    # amount smoothly — it does NOT shift geometry like smoothing the depth would.
     spread = 0.6 * dil + 0.4 * radius_px
-    return cv2.GaussianBlur(np.maximum(radius_px, spread), (0, 0), sigmaX=max(2.0, win / 3.0)).astype(np.float32)
+    out = np.maximum(radius_px, spread)
+    return cv2.GaussianBlur(out, (0, 0), sigmaX=max(3.0, min(h, w) / 70.0)).astype(np.float32)
 
 
 def _near_foreground_alpha(
@@ -290,14 +294,24 @@ def _near_foreground_alpha(
     layer that *spreads* over what's behind — otherwise they stay hard-edged in the flat plate."""
     h, w = signal.shape[:2]
     if metric:  # metres: nearer = smaller
-        near = (signal < float(focus) * 0.8).astype(np.float32)
-    else:  # normalized disparity: nearer = larger
-        near = (signal > float(focus) + 0.12).astype(np.float32)
+        near = (signal < float(focus) * 0.7).astype(np.float32)
+    else:  # normalized disparity: nearer = larger — require STRONGLY near, not a local depth spike
+        near = (signal > float(focus) + 0.22).astype(np.float32)
     near = near * (1.0 - a_sub)  # never the subject
     if float(near.sum()) < 1.0:
         return near
     k = max(3, (min(h, w) // 200) | 1)
     near = cv2.morphologyEx(near, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    # drop small blobs: a mono-depth spike on a dark object is not a real occluder (a pole/railing
+    # by the lens is large). Keeps the layer from smearing tan blobs over background people/objects.
+    nb, lab, stats, _ = cv2.connectedComponentsWithStats((near > 0.5).astype(np.uint8), connectivity=8)
+    keep = np.zeros_like(near)
+    for i in range(1, nb):
+        if stats[i, cv2.CC_STAT_AREA] >= 0.005 * h * w:
+            keep[lab == i] = 1.0
+    near = near * keep
+    if float(near.sum()) < 1.0:
+        return near
     near = cv2.GaussianBlur(near, (0, 0), sigmaX=max(1.5, min(h, w) / 400.0))
     return np.clip(near, 0.0, 1.0)
 
@@ -419,4 +433,8 @@ def render_layered_dof(
         out = _apply_ca(out, p.ca)
     if p.distortion > 0:  # barrel lens distortion
         out = _apply_distortion(out, p.distortion)
+    if p.grain > 0:  # modeled film grain — the very last pass, on the final frame
+        from .grain import apply_grain
+
+        out = apply_grain(out, p.grain, p.grain_size, p.grain_seed)
     return out
