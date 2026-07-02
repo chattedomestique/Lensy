@@ -58,3 +58,9 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+        # GitHub's Pages backend intermittently leaves a deployment in "queued" far longer than the
+        # action's 10-min default, tripping "Timeout reached, aborting!" even though the build is fine.
+        # Give it more room and tolerate transient status-poll blips before failing.
+        with:
+          timeout: 1800000      # 30 min (ms) — ride out a slow Pages queue
+          error_count: 20       # tolerate more transient polling errors
