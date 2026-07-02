@@ -45,11 +45,20 @@ type Key =
 
 const DEFAULTS: Record<Key, number> = {
   amount: 50, position: 50, contrast: 0, falloff: 20,
-  k: 60, highlight: 18, halation: 0, halationSize: 40,
+  k: 60, highlight: 72, halation: 0, halationSize: 40,
   ca: 0, swirl: 0, sweet: 0, sweetSize: 35,
 };
 const state: Record<Key, number> = { ...DEFAULTS };
 let blades = 0;
+
+// The character effects are far too strong across their full 0..1 backend range — the useful
+// zone is the bottom quarter. So the on-screen 0..100 maps to a 0..0.25 backend value (i.e. a
+// UI value of 100 == the old "25"), giving fine control where it matters. Blur, the sizes, and
+// the depth sliders keep their full range.
+const BACKEND_MAX: Partial<Record<Key, number>> = {
+  highlight: 0.25, halation: 0.25, ca: 0.25, swirl: 0.25, sweet: 0.25,
+};
+const backendVal = (key: Key): number => (state[key] / 100) * (BACKEND_MAX[key] ?? 1);
 
 interface Tool {
   id: string;
@@ -180,6 +189,8 @@ function selectTool(t: Tool): void {
   );
   buildSubrow();
   updateOverlayLabel();
+  // switching tools brings the floating instructions back
+  dragSurface.classList.remove("dismissed", "dragging");
   // depth tool → show the live focus map; lens tools → show the current result
   if (t.id === "depth") showDepthLive();
   else hideDepthLive();
@@ -237,6 +248,7 @@ function updateOverlayLabel(): void {
 
 // ---- the big drag slider ----
 let dragging = false;
+let moved = false;
 let dragStartY = 0;
 let dragStartVal = 0;
 
@@ -246,9 +258,11 @@ function bindDrag(): void {
     if (!editor.ready) return;
     e.preventDefault();
     dragging = true;
+    moved = false;
     dragStartY = e.clientY;
     dragStartVal = state[activeKey];
-    dragSurface.classList.add("dragging");
+    // touching the image dismisses the floating instructions so the photo is unobstructed
+    dragSurface.classList.add("dismissed");
     try {
       dragSurface.setPointerCapture(e.pointerId);
     } catch {
@@ -261,6 +275,11 @@ function bindDrag(): void {
     // drag up = increase. Full 0→100 sweep over ~65% of the stage height.
     const span = Math.max(180, stage.clientHeight * 0.65);
     const delta = ((dragStartY - e.clientY) / span) * 100;
+    if (!moved && Math.abs(e.clientY - dragStartY) > 3) {
+      moved = true;
+      dragSurface.classList.add("dragging"); // reveal the odometer only once we actually drag
+    }
+    if (!moved) return;
     const v = Math.min(100, Math.max(0, dragStartVal + delta));
     state[activeKey] = v;
     setTicker(v);
@@ -276,8 +295,9 @@ function bindDrag(): void {
   const end = () => {
     if (!dragging) return;
     dragging = false;
-    dragSurface.classList.remove("dragging");
-    scheduleRender();
+    dragSurface.classList.remove("dragging"); // hide the odometer; label stays dismissed
+    if (moved) scheduleRender();
+    moved = false;
   };
   dragSurface.addEventListener("pointerup", end);
   dragSurface.addEventListener("pointercancel", end);
@@ -300,14 +320,14 @@ function renderParams(): RenderParams {
     autofocus: false,
     subject_dof: false,
     blades,
-    highlight_boost: state.highlight / 100,
+    highlight_boost: backendVal("highlight"),
     cat_eye: 0.2,
-    swirl: state.swirl / 100,
-    sweet: state.sweet / 100,
+    swirl: backendVal("swirl"),
+    sweet: backendVal("sweet"),
     sweet_size: state.sweetSize / 100,
-    halation: state.halation / 100,
+    halation: backendVal("halation"),
     halation_size: state.halationSize / 100,
-    ca: state.ca / 100,
+    ca: backendVal("ca"),
   };
 }
 

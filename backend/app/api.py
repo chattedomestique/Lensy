@@ -54,6 +54,7 @@ class Analysis:
     depth: np.ndarray      # depth [0,1], near = 1
     fg: np.ndarray | None = None        # decontaminated F — computed lazily on the first render
     clean_bg: np.ndarray | None = None  # inpainted background — the slow step, cached after
+    icc: bytes | None = None            # source ICC profile (e.g. Display P3), carried to output
     created: float = field(default_factory=time.time)
 
 
@@ -61,17 +62,24 @@ def _friendly(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
 
-def _decode_image(raw: bytes) -> np.ndarray:
+def _decode_image(raw: bytes) -> tuple[np.ndarray, bytes | None]:
+    """Decode to RGB uint8 and return the source ICC profile (Display P3 for most iPhone photos)
+    so we can carry it to the output — otherwise wide-gamut colour is reinterpreted as sRGB and
+    the render looks washed-out next to the original. P3 shares sRGB's transfer curve, so the
+    linear-light blur math is unaffected; only the profile tag needs to survive."""
     try:
-        img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw)).convert("RGB"))
-        return np.asarray(img, dtype=np.uint8)
+        im = Image.open(io.BytesIO(raw))
+        icc = im.info.get("icc_profile")
+        img = ImageOps.exif_transpose(im).convert("RGB")
+        return np.asarray(img, dtype=np.uint8), icc
     except Exception as e:
         raise ValueError(f"could not decode image: {e}") from e
 
 
-def _encode_jpeg(rgb_u8: np.ndarray, quality: int = 92) -> bytes:
+def _encode_jpeg(rgb_u8: np.ndarray, quality: int = 92, icc: bytes | None = None) -> bytes:
     buf = io.BytesIO()
-    Image.fromarray(rgb_u8).save(buf, format="JPEG", quality=quality, subsampling=0)
+    kw = {"icc_profile": icc} if icc else {}
+    Image.fromarray(rgb_u8).save(buf, format="JPEG", quality=quality, subsampling=0, **kw)
     return buf.getvalue()
 
 
@@ -118,7 +126,7 @@ async def analyze_photo(
     if len(raw) > 100 * 1024 * 1024:
         return _friendly(413, "too_large", "Image exceeds the 100 MB limit.")
     try:
-        rgb = _decode_image(raw)
+        rgb, icc = _decode_image(raw)
     except ValueError as e:
         return _friendly(400, "bad_image", str(e))
 
@@ -132,7 +140,7 @@ async def analyze_photo(
 
     _evict(_ANALYSES, _MAX_ANALYSES)
     aid = uuid.uuid4().hex
-    _ANALYSES[aid] = Analysis(id=aid, work=work, alpha=alpha, depth=depth)
+    _ANALYSES[aid] = Analysis(id=aid, work=work, alpha=alpha, depth=depth, icc=icc)
     h, w = work.shape[:2]
     return JSONResponse({"analyze_id": aid, "width": w, "height": h})
 
@@ -158,7 +166,7 @@ async def analyze_photo_img(aid: str) -> Response:
     a = _ANALYSES.get(aid)
     if a is None:
         raise HTTPException(status_code=404, detail="unknown analysis")
-    return Response(content=_encode_jpeg(a.work), media_type="image/jpeg")
+    return Response(content=_encode_jpeg(a.work, icc=a.icc), media_type="image/jpeg")
 
 
 # ----------------------------------- render ----------------------------------------
@@ -187,8 +195,9 @@ def _params_from_form(
     )
 
 
-def _spawn_render(request: Request, fn, *args) -> JSONResponse:
-    """Run a render callable (fn(*args, progress) -> rgb) as a background job with SSE progress."""
+def _spawn_render(request: Request, fn, *args, icc: bytes | None = None) -> JSONResponse:
+    """Run a render callable (fn(*args, progress) -> rgb) as a background job with SSE progress.
+    The output JPEG is tagged with `icc` so wide-gamut colour survives the round-trip."""
     if len(_JOBS) >= _MAX_JOBS:
         for jid in list(_JOBS)[: len(_JOBS) - _MAX_JOBS + 1]:
             _JOBS.pop(jid, None)
@@ -204,7 +213,7 @@ def _spawn_render(request: Request, fn, *args) -> JSONResponse:
     async def worker() -> None:
         try:
             out = await loop.run_in_executor(None, fn, *args, progress_cb)
-            job.result_jpeg = await loop.run_in_executor(None, _encode_jpeg, out)
+            job.result_jpeg = await loop.run_in_executor(None, lambda: _encode_jpeg(out, icc=icc))
         except Exception as e:  # noqa: BLE001
             log.exception("render failed")
             job.error = f"{e.__class__.__name__}: {e}"
@@ -268,7 +277,7 @@ async def start_render(
                 a.fg, a.clean_bg = precompose(a.work, a.alpha, bundle)
             return render_from(a.work, a.alpha, a.fg, a.clean_bg, depth_map, params, progress)
 
-        return _spawn_render(request, do_render)
+        return _spawn_render(request, do_render, icc=a.icc)
 
     # Path B — one-shot from a photo (automatic depth)
     if photo is None:
@@ -279,10 +288,10 @@ async def start_render(
     if len(raw) > 100 * 1024 * 1024:
         return _friendly(413, "too_large", "Image exceeds the 100 MB limit.")
     try:
-        rgb = _decode_image(raw)
+        rgb, icc = _decode_image(raw)
     except ValueError as e:
         return _friendly(400, "bad_image", str(e))
-    return _spawn_render(request, run_pipeline, rgb, params, bundle)
+    return _spawn_render(request, run_pipeline, rgb, params, bundle, icc=icc)
 
 
 @router.get("/render/{job_id}/events")

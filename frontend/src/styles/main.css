@@ -2,15 +2,18 @@
    Warm-tinted neutrals, one loud accent, an odometer read-out for the drag slider. */
 
 :root {
-  --bg: #0f0e0c;
-  --surface: #1b1815;
-  --surface-2: #262119;
-  --text: #f2ede3;
-  --subtle: #9b958a;
-  --line: rgba(242, 237, 227, 0.1);
-  --accent: #ff8a5c;
-  --accent-2: #6fb6d6;
-  --accent-ink: #16140f;
+  /* sophisticated monochrome — warm graphite, no true black / no true white;
+     colour is used sparingly (a muted accent for the active indicator + status) */
+  --bg: #1b1a18;
+  --surface: #242220;
+  --surface-2: #2f2c29;
+  --surface-3: #3b3733;
+  --text: #eae5dd;
+  --subtle: #928b82;
+  --line: rgba(234, 229, 221, 0.11);
+  --accent: #cf8a5f;     /* muted terracotta — sporadic use only */
+  --accent-2: #7d94a0;   /* muted slate — rare cool counterpoint */
+  --accent-ink: #1b1a18;
 
   --font-display: ui-serif, "New York", Canela, Freight, Georgia, serif;
   --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Geist", system-ui, sans-serif;
@@ -170,8 +173,9 @@ canvas.stage-img { image-rendering: auto; }
   font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--subtle);
 }
-/* while dragging: fade the label, reveal the odometer */
-.drag-surface.dragging .tool-idle { opacity: 0; visibility: hidden; transition: opacity var(--t) var(--spring), visibility 0s linear var(--t); }
+/* touching the image dismisses the label (so the photo shows); dragging reveals the odometer.
+   Switching tools clears `dismissed` and the instructions return. */
+.drag-surface.dismissed .tool-idle { opacity: 0; visibility: hidden; transition: opacity var(--t) var(--spring), visibility 0s linear var(--t); }
 .drag-surface.dragging .ticker { opacity: 1; visibility: visible; transition: opacity var(--t) var(--spring), visibility 0s; }
 
 /* odometer ticker (0..100) */
@@ -251,8 +255,8 @@ canvas.stage-img { image-rendering: auto; }
   transition: color var(--t) var(--spring), background var(--t) var(--spring), border-color var(--t) var(--spring);
 }
 .chip[aria-pressed="true"] {
-  color: var(--accent); border-color: color-mix(in oklab, var(--accent) 55%, transparent);
-  background: color-mix(in oklab, var(--accent) 12%, var(--surface-2));
+  color: var(--text); border-color: var(--line);
+  background: var(--surface-3);
 }
 .shapes { display: flex; gap: var(--s1); margin-left: auto; }
 .chip.shape { min-width: 34px; text-align: center; padding: 7px 8px; }
@@ -262,15 +266,22 @@ canvas.stage-img { image-rendering: auto; }
   padding: var(--s2) var(--s1) calc(var(--s2) + 2px);
 }
 .tab {
+  position: relative;
   flex: 1 1 0;
   min-width: 0;
   font: inherit; font-size: 10.5px; font-weight: 600; letter-spacing: -0.01em;
   color: var(--subtle); background: transparent;
-  border: none; border-radius: 8px; padding: 10px 2px; cursor: pointer;
+  border: none; border-radius: 8px; padding: 10px 2px 12px; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  transition: color var(--t) var(--spring), background var(--t) var(--spring);
+  transition: color var(--t) var(--spring);
 }
-.tab[aria-selected="true"] { color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
+.tab[aria-selected="true"] { color: var(--text); }
+/* the one sporadic dab of colour: a small accent underline on the active tool */
+.tab[aria-selected="true"]::after {
+  content: ""; position: absolute; left: 50%; bottom: 4px;
+  width: 16px; height: 2px; border-radius: 2px;
+  background: var(--accent); transform: translateX(-50%);
+}
 .tab:hover { color: var(--text); }
 
 /* --- server connect panel (modal-ish, floats over everything) --- */
