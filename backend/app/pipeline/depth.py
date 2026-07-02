@@ -73,7 +73,32 @@ def normalize01(d: np.ndarray) -> np.ndarray:
     return _normalize(d)
 
 
+def _da3_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
+    """Depth Anything V3 mono path: inference([rgb]) → Prediction.depth (metric, near = small).
+    Returned as metric depth; run_pipeline inverts it to disparity (depth_metric=True)."""
+    import os
+
+    import torch
+
+    h, w = rgb_u8.shape[:2]
+    res = int(os.environ.get("LENSY_DA3_RES", "768"))
+    with torch.no_grad():
+        pred = bundle.depth_model.inference([rgb_u8], process_res=res)
+    d = np.asarray(pred.depth).squeeze().astype(np.float32)
+    if bundle.device == "mps":
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
+    if d.shape != (h, w):
+        d = cv2.resize(d, (w, h), interpolation=cv2.INTER_LINEAR)
+    return np.clip(d, 0.05, None).astype(np.float32)
+
+
 def _model_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
+    if getattr(bundle, "depth_backend", "hf") == "da3":
+        return _da3_disparity(rgb_u8, bundle)
+
     import torch
     from PIL import Image
 

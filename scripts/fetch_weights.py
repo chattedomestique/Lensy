@@ -72,11 +72,33 @@ def fetch_sam2() -> None:
     Sam2Processor.from_pretrained(SAM2_MODEL_ID)
 
 
+DA3_MODEL_ID = os.environ.get("LENSY_DA3_MODEL", "depth-anything/da3mono-large")
+
+
+def fetch_da3() -> None:
+    # mirror runtime's stubs so the import doesn't drag the 3D/video export deps
+    import sys
+    import types
+
+    for name, attrs in (
+        ("depth_anything_3.utils.export", {"export": lambda *a, **k: None}),
+        ("depth_anything_3.utils.pose_align", {"align_poses_umeyama": lambda *a, **k: None}),
+    ):
+        mod = types.ModuleType(name)
+        for k, v in attrs.items():
+            setattr(mod, k, v)
+        sys.modules.setdefault(name, mod)
+    from depth_anything_3.api import DepthAnything3
+
+    DepthAnything3.from_pretrained(DA3_MODEL_ID)
+
+
 def main() -> int:
     print("Pre-caching model weights into backend/models/ …")
     results = {
         "BiRefNet (matte)": _try("BiRefNet", fetch_birefnet),
-        "Depth Anything V2 (depth)": _try("Depth Anything V2", fetch_depth),
+        "Depth Anything V3 (depth)": _try("Depth Anything V3", fetch_da3),
+        "Depth Anything V2 (depth fallback)": _try("Depth Anything V2", fetch_depth),
         "LaMa (inpaint)": _try("LaMa", fetch_lama),
         "SAM2 (object select)": _try("SAM2", fetch_sam2),
     }

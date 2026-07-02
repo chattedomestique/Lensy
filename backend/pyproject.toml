@@ -30,6 +30,11 @@ models = [
     "huggingface-hub>=0.23",
     "scipy>=1.12",
     "simple-lama-inpainting>=0.1.2",  # LaMa big-lama inpaint
+    # Depth Anything V3 runtime deps (the `depth-anything-3` package itself is installed --no-deps
+    # by setup.sh to skip its xformers/3D extras; these are the small bits single-image depth needs)
+    "omegaconf>=2.3",
+    "imageio>=2.34",
+    "addict>=2.4",
 ]
 dev = [
     "ruff>=0.4",

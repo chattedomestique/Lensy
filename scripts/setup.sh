@@ -44,7 +44,15 @@ else
       pip install -q --force-reinstall "opencv-contrib-python>=4.9"
       ok "normalized OpenCV to contrib-only (guidedFilter available)"
     fi
-    say "Pre-caching weights (BiRefNet, Depth Pro, LaMa) — may take a while, never fatal"
+    # Depth Anything V3 (default depth model). Its package hard-depends on xformers (won't build
+    # on macOS) + multi-view/3D extras we never use, so install it --no-deps and add only the
+    # small runtime deps single-image depth actually needs. Non-fatal — falls back to V2-Large.
+    say "SAM2 / DA3 depth deps — best effort"
+    pip install -q --no-deps depth-anything-3 >/dev/null 2>&1 \
+      && pip install -q omegaconf imageio addict >/dev/null 2>&1 \
+      && ok "Depth Anything V3 installed (--no-deps)" \
+      || warn "DA3 not installed — depth falls back to Depth-Anything-V2-Large"
+    say "Pre-caching weights (BiRefNet, depth, LaMa, SAM2) — may take a while, never fatal"
     python "$ROOT/scripts/fetch_weights.py" || warn "some weights not cached; fallbacks will be used until they are"
   else
     warn "model deps failed to install — Lensy will use classic fallbacks (still works)"

@@ -43,9 +43,10 @@ class ModelBundle:
     device: str = "cpu"
     matte_model: object | None = None       # BiRefNet
     matte_processor: object | None = None
-    depth_model: object | None = None       # Apple Depth Pro
+    depth_model: object | None = None       # Depth Anything V2/V3, or Depth Pro
     depth_transform: object | None = None
     depth_metric: bool = False               # True = model outputs metric depth (invert for disparity)
+    depth_backend: str = "hf"                # "hf" (transformers) or "da3" (Depth Anything 3 pkg)
     depth_name: str = "depth"
     inpaint_model: object | None = None      # LaMa
     sam2_model: object | None = None         # Segment Anything 2 (interactive object select)
@@ -87,12 +88,27 @@ def load_bundle() -> ModelBundle:
 
     # --- Depth ---
     try:
-        b.depth_model, b.depth_transform = _load_depth(b.device)
-        b.depth_metric = "depthpro" in _DEPTH_MODEL_ID.lower()
-        b.depth_name = "depth-pro" if b.depth_metric else "depth-anything-v2"
+        if "da3" in _DEPTH_MODEL_ID.lower():
+            b.depth_model = _load_da3(b.device)
+            b.depth_backend = "da3"
+            b.depth_metric = True  # DA3 mono outputs (metric) depth → inverted to disparity
+            b.depth_name = "depth-anything-v3-mono"
+        else:
+            b.depth_model, b.depth_transform = _load_depth(b.device)
+            b.depth_metric = "depthpro" in _DEPTH_MODEL_ID.lower()
+            b.depth_name = "depth-pro" if b.depth_metric else "depth-anything-v2"
     except Exception as e:
-        b.notes.append(f"depth model unavailable ({e.__class__.__name__}); depth = radial fallback")
-        log.info("Depth model not loaded: %s", e)
+        log.info("Depth model %s not loaded: %s", _DEPTH_MODEL_ID, e)
+        # DA3's packaging is finicky (xformers/3D extras) — fall back to the reliable V2-Large
+        # before dropping all the way to the radial guess.
+        try:
+            b.depth_model, b.depth_transform = _load_depth(b.device, _DEPTH_FALLBACK_ID)
+            b.depth_backend = "hf"
+            b.depth_metric = False
+            b.depth_name = "depth-anything-v2"
+            b.notes.append(f"{_DEPTH_MODEL_ID} unavailable ({e.__class__.__name__}); using V2-Large")
+        except Exception as e2:
+            b.notes.append(f"depth unavailable ({e2.__class__.__name__}); depth = radial fallback")
 
     # --- LaMa inpaint (optional; cv2.inpaint is the cheap fallback) ---
     try:
@@ -139,32 +155,66 @@ def _load_birefnet(device: str):
     return model, None  # BiRefNet preprocessing is simple; done inline in matte.py
 
 
-# Depth model. Default **Depth Anything V2 Large** (~1.5s) — fast enough for the interactive
-# depth-map editor, where the user refines levels/smoothing by hand. Options via LENSY_DEPTH_MODEL:
-#   depth-anything/Depth-Anything-V2-Large-hf   (~1.5s, good gradient — default)
+# Depth model. Default **Depth Anything V3 mono-Large** (~1.5s) — same size class as V2-Large but
+# richer, more continuous depth (predicts true depth, not disparity), so the blur falloff grades
+# more convincingly. Options via LENSY_DEPTH_MODEL:
+#   da3mono                                     (Depth Anything V3 mono-Large — default)
+#   depth-anything/Depth-Anything-V2-Large-hf   (~1.5s, transformers-native; the reliable fallback)
 #   depth-anything/Depth-Anything-V2-Base-hf    (~0.4s, fastest)
 #   apple/DepthPro-hf                            (~40-80s, richest metric depth, memory-heavy)
-_DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Large-hf")
+_DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "da3mono")
+_DEPTH_FALLBACK_ID = "depth-anything/Depth-Anything-V2-Large-hf"
+_DA3_MODEL_ID = os.environ.get("LENSY_DA3_MODEL", "depth-anything/da3mono-large")
 
 
-def _load_depth(device: str):
-    """Load the depth model + processor. Depth Pro needs its own classes and outputs *metric*
-    depth (meters → invert for disparity); Depth Anything outputs disparity-like values directly.
-    load_bundle() sets `depth_metric` from the model id."""
+def _load_depth(device: str, model_id: str | None = None):
+    """Load a transformers depth model + processor. Depth Pro needs its own classes and outputs
+    *metric* depth (meters → invert for disparity); Depth Anything V2 outputs disparity-like values
+    directly. load_bundle() sets `depth_metric` from the model id."""
     import torch
 
-    if "depthpro" in _DEPTH_MODEL_ID.lower():
+    model_id = model_id or _DEPTH_MODEL_ID
+    if "depthpro" in model_id.lower():
         from transformers import DepthProForDepthEstimation, DepthProImageProcessor
 
-        processor = DepthProImageProcessor.from_pretrained(_DEPTH_MODEL_ID)
-        model = DepthProForDepthEstimation.from_pretrained(_DEPTH_MODEL_ID, dtype=torch.float32)
+        processor = DepthProImageProcessor.from_pretrained(model_id)
+        model = DepthProForDepthEstimation.from_pretrained(model_id, dtype=torch.float32)
     else:
         from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
-        processor = AutoImageProcessor.from_pretrained(_DEPTH_MODEL_ID)
-        model = AutoModelForDepthEstimation.from_pretrained(_DEPTH_MODEL_ID)
+        processor = AutoImageProcessor.from_pretrained(model_id)
+        model = AutoModelForDepthEstimation.from_pretrained(model_id)
     model.to(device).float().eval()
     return model, processor
+
+
+def _install_da3_stubs() -> None:
+    """DA3's official package hard-depends on multi-view / 3D / CUDA extras (xformers, evo, trimesh,
+    moviepy) that single-image depth never touches — and its api.py imports two of them at module
+    load. We install the package `--no-deps` and stub those two submodules so the import succeeds."""
+    import sys
+    import types
+
+    for name, attrs in (
+        ("depth_anything_3.utils.export", {"export": lambda *a, **k: None}),
+        ("depth_anything_3.utils.pose_align", {"align_poses_umeyama": lambda *a, **k: None}),
+    ):
+        if name not in sys.modules:
+            mod = types.ModuleType(name)
+            for k, v in attrs.items():
+                setattr(mod, k, v)
+            sys.modules[name] = mod
+
+
+def _load_da3(device: str):
+    """Depth Anything V3 (mono). Loads via the `depth_anything_3` package (not transformers).
+    Inference is `model.inference([rgb], process_res=…) -> Prediction.depth` (metric depth)."""
+    _install_da3_stubs()
+    from depth_anything_3.api import DepthAnything3
+
+    model = DepthAnything3.from_pretrained(_DA3_MODEL_ID)
+    model.to(device).eval()
+    return model
 
 
 # SAM2 (Segment Anything 2.1) for tap-to-select object removal. `-large` is only ~900MB and the
