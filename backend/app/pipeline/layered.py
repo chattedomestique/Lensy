@@ -196,6 +196,22 @@ def _sweet_amount(h: int, w: int, p: BlurParams, cx: float, cy: float) -> np.nda
     return ((t * t * (3.0 - 2.0 * t)) * float(p.sweet)).astype(np.float32)
 
 
+def _apply_bloom(img_lin: np.ndarray, strength: float) -> np.ndarray:
+    """Bloom: bright areas spill a soft NEUTRAL glow across the frame (a lens/veiling-glare look).
+    Unlike halation (highlights only, warm), bloom is white and reads on any bright region — skin
+    highlights, sky, specular. Multi-scale so it's soft, not a hard ring. Applied in linear light."""
+    if strength <= 0:
+        return img_lin
+    h, w = img_lin.shape[:2]
+    diag = float(np.hypot(h, w))
+    lum = img_lin @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    hi = np.clip(lum - 0.55, 0.0, None)  # everything reasonably bright (linear)
+    g1 = cv2.GaussianBlur(hi, (0, 0), sigmaX=max(2.0, diag * 0.008))
+    g2 = cv2.GaussianBlur(hi, (0, 0), sigmaX=max(4.0, diag * 0.028))
+    glow = (0.6 * g1 + 0.4 * g2)[..., None]
+    return (img_lin + (strength * 4.5) * glow).astype(np.float32)
+
+
 def _apply_halation(img_lin: np.ndarray, strength: float, size: float) -> np.ndarray:
     """Film halation: light scatters inside the emulsion and reflects off the base, so a warm
     RED-ORANGE glow bleeds out of the HIGHLIGHTS only (unlike bloom, which glows everywhere). We
@@ -204,11 +220,11 @@ def _apply_halation(img_lin: np.ndarray, strength: float, size: float) -> np.nda
         return img_lin
     h, w = img_lin.shape[:2]
     lum = img_lin @ np.array([0.2126, 0.7152, 0.0722], np.float32)
-    hi = np.clip((lum - 0.7) / 0.3, 0.0, 1.0)  # highlights only
-    sigma = max(2.0, float(size) * float(np.hypot(h, w)) * 0.02)
+    hi = np.clip((lum - 0.5) / 0.5, 0.0, 1.0) ** 1.5  # highlights, softly ramped in
+    sigma = max(3.0, float(size) * float(np.hypot(h, w)) * 0.03)
     glow = cv2.GaussianBlur(hi, (0, 0), sigmaX=sigma)[..., None]
-    tint = np.array([1.0, 0.32, 0.12], np.float32)  # red-orange
-    return (img_lin + (strength * 0.9) * glow * tint).astype(np.float32)
+    tint = np.array([1.0, 0.28, 0.1], np.float32)  # red-orange
+    return (img_lin + (strength * 2.6) * glow * tint).astype(np.float32)
 
 
 def _apply_ca(img_u8: np.ndarray, amount: float) -> np.ndarray:
@@ -220,7 +236,7 @@ def _apply_ca(img_u8: np.ndarray, amount: float) -> np.ndarray:
     cx, cy = w / 2.0, h / 2.0
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     dx, dy = xx - cx, yy - cy
-    k = float(amount) * 0.012  # max magnification delta
+    k = float(amount) * 0.018  # max magnification delta
 
     def scaled(ch: np.ndarray, s: float) -> np.ndarray:
         srcx = np.ascontiguousarray(cx + dx / s, dtype=np.float32)
@@ -230,6 +246,24 @@ def _apply_ca(img_u8: np.ndarray, amount: float) -> np.ndarray:
     r = scaled(img_u8[:, :, 0], 1.0 + k)  # red image slightly larger
     b = scaled(img_u8[:, :, 2], 1.0 - k)  # blue slightly smaller
     return np.stack([r, img_u8[:, :, 1], b], axis=-1)
+
+
+def _apply_distortion(img_u8: np.ndarray, amount: float) -> np.ndarray:
+    """Barrel lens distortion — straight lines bow outward, the wide-angle/phone-lens look. A
+    radial resample about the optical axis; a compensating zoom keeps the corners inside frame."""
+    if amount <= 0:
+        return img_u8
+    h, w = img_u8.shape[:2]
+    cx, cy = w / 2.0, h / 2.0
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    nx = (xx - cx) / cx
+    ny = (yy - cy) / cy
+    r2 = nx * nx + ny * ny
+    k = float(amount) * 0.28  # barrel strength
+    factor = (1.0 + k * r2) / (1.0 + k)  # compensating zoom so corners stay in bounds
+    srcx = np.ascontiguousarray(cx + (xx - cx) * factor, dtype=np.float32)
+    srcy = np.ascontiguousarray(cy + (yy - cy) * factor, dtype=np.float32)
+    return cv2.remap(img_u8, srcx, srcy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT101)
 
 
 def render_layered_dof(
@@ -291,10 +325,16 @@ def render_layered_dof(
 
     # --- compose foreground OVER background (premultiplied) ---
     out_lin = fgc + bg_rendered * (1.0 - fga)
-    if p.halation > 0:  # warm film glow out of the highlights (linear light, before tonemap)
+    # glows in linear light, before tonemap, so the spill stays bright
+    if p.highlight_boost > 0:  # neutral bloom across the frame
+        out_lin = _apply_bloom(out_lin, p.highlight_boost)
+    if p.halation > 0:  # warm red-orange glow out of the highlights only
         out_lin = _apply_halation(out_lin, p.halation, p.halation_size)
     out_lin = tonemap_highlights(out_lin)
     out = (np.clip(linear_to_srgb(out_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-    if p.ca > 0:  # lateral chromatic aberration — geometric channel shift, last
+    # geometric lens optics, last
+    if p.ca > 0:  # lateral chromatic aberration — per-channel magnification
         out = _apply_ca(out, p.ca)
+    if p.distortion > 0:  # barrel lens distortion
+        out = _apply_distortion(out, p.distortion)
     return out

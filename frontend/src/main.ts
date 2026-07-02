@@ -46,22 +46,21 @@ const progressLabel = $("progress-label");
 type Key =
   | "amount" | "position" | "contrast" | "falloff"       // depth (client-side)
   | "k" | "highlight" | "halation" | "halationSize"       // lens (backend)
-  | "ca" | "swirl" | "sweet" | "sweetSize";
+  | "ca" | "swirl" | "sweet" | "sweetSize" | "distortion";
 
 const DEFAULTS: Record<Key, number> = {
   amount: 50, position: 50, contrast: 0, falloff: 20,
-  k: 60, highlight: 72, halation: 0, halationSize: 40,
-  ca: 0, swirl: 0, sweet: 0, sweetSize: 35,
+  k: 60, highlight: 0, halation: 0, halationSize: 40,
+  ca: 0, swirl: 0, sweet: 0, sweetSize: 35, distortion: 0,
 };
 const state: Record<Key, number> = { ...DEFAULTS };
 let blades = 0;
 
-// The character effects are far too strong across their full 0..1 backend range — the useful
-// zone is the bottom quarter. So the on-screen 0..100 maps to a 0..0.25 backend value (i.e. a
-// UI value of 100 == the old "25"), giving fine control where it matters. Blur, the sizes, and
-// the depth sliders keep their full range.
+// The character effects live in the low end of their raw 0..1 range, so the on-screen 0..100 maps
+// to a smaller backend ceiling per effect (UI 100 = that ceiling), giving fine control where it
+// matters. Blur, the sizes, distortion, and the depth sliders keep (near-)full range.
 const BACKEND_MAX: Partial<Record<Key, number>> = {
-  highlight: 0.25, halation: 0.25, ca: 0.25, swirl: 0.25, sweet: 0.25,
+  highlight: 0.4, halation: 0.4, ca: 0.25, swirl: 0.25, sweet: 0.25, distortion: 1.0,
 };
 const backendVal = (key: Key): number => (state[key] / 100) * (BACKEND_MAX[key] ?? 1);
 
@@ -93,7 +92,13 @@ const TOOLS: Tool[] = [
       { key: "halationSize", label: "Spread" },
     ],
   },
-  { id: "chroma", label: "Chroma", params: [{ key: "ca", label: "Chromatic aberration" }] },
+  {
+    id: "chroma", label: "Chroma",
+    params: [
+      { key: "ca", label: "Chromatic aberration" },
+      { key: "distortion", label: "Lens distortion" },
+    ],
+  },
   { id: "petzval", label: "Petzval", params: [{ key: "swirl", label: "Swirl" }] },
   {
     id: "lensbaby", label: "Lensbaby",
@@ -551,6 +556,7 @@ function renderParams(): RenderParams {
     halation: backendVal("halation"),
     halation_size: state.halationSize / 100,
     ca: backendVal("ca"),
+    distortion: backendVal("distortion"),
   };
 }
 

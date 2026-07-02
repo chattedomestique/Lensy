@@ -248,7 +248,7 @@ async def erase_object(
 
 def _params_from_form(
     k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
-    swirl, sweet, sweet_size, halation, halation_size, ca, working_res,
+    swirl, sweet, sweet_size, halation, halation_size, ca, distortion, working_res,
 ) -> RenderParams:
     return RenderParams(
         k=float(np.clip(k, 0, 100)),
@@ -265,6 +265,7 @@ def _params_from_form(
         halation=float(np.clip(halation, 0, 1)),
         halation_size=float(np.clip(halation_size, 0.05, 1)),
         ca=float(np.clip(ca, 0, 1)),
+        distortion=float(np.clip(distortion, 0, 1)),
         working_res=int(np.clip(working_res, 512, 4096)),
     )
 
@@ -321,6 +322,7 @@ async def start_render(
     halation: float = Form(0.0),
     halation_size: float = Form(0.4),
     ca: float = Form(0.0),
+    distortion: float = Form(0.0),
     working_res: int = Form(2048),
 ) -> JSONResponse:
     bundle = getattr(request.app.state, "bundle", None)
@@ -328,7 +330,7 @@ async def start_render(
         return _friendly(503, "warming", "Models are still loading — try again in a moment.")
     params = _params_from_form(
         k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
-        swirl, sweet, sweet_size, halation, halation_size, ca, working_res,
+        swirl, sweet, sweet_size, halation, halation_size, ca, distortion, working_res,
     )
 
     # Path A — render from a prior analysis + (optionally) a hand-edited depth map

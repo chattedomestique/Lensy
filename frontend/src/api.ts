@@ -18,6 +18,7 @@ export interface RenderParams {
   halation: number; // 0..1 reddish film glow out of the highlights
   halation_size: number; // 0..1 how far the halation spreads
   ca: number; // 0..1 lateral chromatic aberration (colour fringing toward edges)
+  distortion: number; // 0..1 barrel lens distortion
 }
 
 export interface ProgressEvent {
@@ -140,6 +141,7 @@ function appendParams(form: FormData, params: RenderParams): void {
   form.append("halation", String(params.halation));
   form.append("halation_size", String(params.halation_size));
   form.append("ca", String(params.ca));
+  form.append("distortion", String(params.distortion));
 }
 
 /** Render from an analysis + an (edited) depth-map PNG blob. */

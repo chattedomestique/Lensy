@@ -45,6 +45,7 @@ class BlurParams:
     halation: float = 0.0      # reddish film glow bleeding out of the highlights
     halation_size: float = 0.4 # how far the halation glow spreads
     ca: float = 0.0            # lateral chromatic aberration — colour fringing toward the edges
+    distortion: float = 0.0    # barrel lens distortion (paired with CA in the UI)
 
 
 # ---- aperture kernels ---------------------------------------------------------------

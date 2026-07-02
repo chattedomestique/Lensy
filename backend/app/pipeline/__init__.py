@@ -50,6 +50,7 @@ class RenderParams:
     halation: float = 0.0        # film halation glow
     halation_size: float = 0.4
     ca: float = 0.0              # lateral chromatic aberration
+    distortion: float = 0.0      # barrel lens distortion
     working_res: int = 2048      # long-edge px the pipeline runs at
 
     def blur_params(self, disp_focus: float | None = None) -> BlurParams:
@@ -67,6 +68,7 @@ class RenderParams:
             halation=self.halation,
             halation_size=self.halation_size,
             ca=self.ca,
+            distortion=self.distortion,
         )
 
 
