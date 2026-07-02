@@ -304,15 +304,26 @@ def _near_foreground_alpha(
 
 def _inpaint_behind(bg_u8: np.ndarray, near_a: np.ndarray) -> np.ndarray:
     """Fill the far plate where a near occluder sits, so revealing behind its blurred edge shows
-    clean background — not a copy of the occluder. Seen only blurred, so cheap Telea inpaint is fine."""
-    mask = (near_a > 0.15).astype(np.uint8) * 255
-    grow = max(3, min(bg_u8.shape[:2]) // 100)
-    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
-    if int(mask.sum()) == 0:
+    clean background — not a copy of the occluder. It's only ever seen blurred behind a soft edge, so
+    a smooth push-pull (normalized-blur) fill is ideal: it spreads the SURROUNDING colours inward with
+    no hard fill boundary and no colour bleeding from a distant object (which cv2.Telea produced)."""
+    h, w = bg_u8.shape[:2]
+    hole = near_a > 0.12
+    grow = max(3, min(h, w) // 120)
+    hole = cv2.dilate(hole.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow))) > 0
+    if not hole.any():
         return bg_u8
-    bgr = cv2.cvtColor(bg_u8, cv2.COLOR_RGB2BGR)
-    filled = cv2.inpaint(bgr, mask, max(3, grow), cv2.INPAINT_TELEA)
-    return cv2.cvtColor(filled, cv2.COLOR_BGR2RGB)
+    known = (~hole).astype(np.float32)  # 2D — cv2.GaussianBlur drops a (H,W,1) singleton channel
+    src = bg_u8.astype(np.float32)
+    acc = src * known[..., None]
+    wsum = known.copy()
+    diag = float(np.hypot(h, w))
+    for sig in (diag * 0.006, diag * 0.02, diag * 0.06):
+        acc = cv2.GaussianBlur(acc, (0, 0), sigmaX=sig)
+        wsum = cv2.GaussianBlur(wsum, (0, 0), sigmaX=sig)
+    fill = acc / np.clip(wsum, 1e-3, None)[..., None]
+    out = np.where(hole[..., None], fill, src)
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def render_layered_dof(
@@ -358,8 +369,12 @@ def render_layered_dof(
         fg_coord = _layer_coord(fg_signal, metric)
         fgc, fga, _ = render_sheet(fg_lin, np.clip(alpha, 0.0, 1.0), fg_coord, fg_radius, p, None)
     else:
-        # keep the subject perfectly sharp — clean cutout over the depth-graded background
-        a = np.clip(alpha, 0.0, 1.0)[..., None].astype(np.float32)
+        # keep the subject perfectly sharp, but pull the matte in ~1px and feather it a touch so the
+        # blurred background covers the contaminated edge pixels (no light outline rim) and the sharp
+        # cutout doesn't read as a hard sticker — most visible at extreme blur.
+        a = np.clip(alpha, 0.0, 1.0).astype(np.float32)
+        a = cv2.erode(a, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        a = cv2.GaussianBlur(a, (0, 0), sigmaX=1.0)[..., None]
         fgc, fga = fg_lin * a, a
 
     # --- Lensbaby sweet spot: blur everything outside a sweet spot centered on the SUBJECT.
