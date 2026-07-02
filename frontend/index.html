@@ -45,9 +45,12 @@
         </div>
         <input id="file" type="file" accept="image/*" class="hidden" />
 
-        <img id="result" class="stage-img hidden" alt="Your photo" />
-        <canvas id="depthview" class="stage-img hidden"></canvas>
-        <canvas id="erase-layer" class="stage-img erase-layer hidden"></canvas>
+        <!-- the media transforms together under pinch-zoom / pan -->
+        <div id="stage-media" class="stage-media">
+          <img id="result" class="stage-img hidden" alt="Your photo" />
+          <canvas id="depthview" class="stage-img hidden"></canvas>
+          <canvas id="erase-layer" class="stage-img erase-layer hidden"></canvas>
+        </div>
 
         <!-- big finger-drag slider overlay -->
         <div id="drag-surface" class="drag-surface hidden">
@@ -72,6 +75,12 @@
 
       <!-- bottom: contextual sub-parameter chips + the tool tab bar -->
       <footer class="dock">
+        <div id="brush-bar" class="brush-bar hidden">
+          <label class="brush-ctl"><span>Size</span>
+            <input id="brush-size" type="range" min="1" max="30" step="1" value="4" /></label>
+          <label class="brush-ctl"><span>Soft</span>
+            <input id="brush-hardness" type="range" min="0" max="100" step="1" value="50" /></label>
+        </div>
         <div id="subrow" class="subrow hidden"></div>
         <nav id="tabbar" class="tabbar" role="tablist" aria-label="Tools"></nav>
       </footer>

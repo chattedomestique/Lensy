@@ -113,7 +113,10 @@ const TOOLS: Tool[] = [
   { id: "refine", label: "Refine", params: [], refine: true },
   { id: "erase", label: "Erase", params: [], erase: true },
 ];
-let refineMode: "sharpen" | "recede" = "sharpen";
+let refineMode: "sharpen" | "recede" | "dissolve" = "sharpen";
+let eraseTarget: "auto" | "subject" | "background" = "auto";
+let brushSize = 4; // % of the long edge
+let brushHardness = 0.5; // 0 soft → 1 hard
 
 let activeTool = TOOLS[0];
 let activeKey: Key = "amount";
@@ -243,6 +246,8 @@ function selectTool(t: Tool): void {
   updateOverlayLabel();
   // switching tools brings the floating instructions back
   dragSurface.classList.remove("dismissed", "dragging");
+  // brush size/hardness bar only for the brush tools
+  $("brush-bar").classList.toggle("hidden", !(t.erase || t.refine));
   if (t.erase) {
     enterEraseMode();
   } else if (t.refine) {
@@ -372,7 +377,7 @@ function updateOverlayLabel(): void {
 
 // ---- the big drag slider ----
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
-const BRUSH_FRAC = 0.035; // brush radius as a fraction of the image's long edge
+const brushFrac = () => brushSize / 100; // brush radius as a fraction of the image's long edge
 
 let dragging = false;
 let moved = false;
@@ -381,7 +386,8 @@ let dragStartY = 0;
 let dragStartVal = 0;
 let strokePainted = false;
 
-/** Normalized coords within the displayed image (clamped). */
+/** Normalized coords within the displayed image (clamped). Works under zoom/pan because the
+ * image's bounding rect already reflects the CSS transform on #stage-media. */
 function normOf(e: PointerEvent): { nx: number; ny: number } {
   const rect = resultImg.getBoundingClientRect();
   return {
@@ -390,10 +396,83 @@ function normOf(e: PointerEvent): { nx: number; ny: number } {
   };
 }
 
+// ---- pinch-zoom / pan (2-finger) ----
+const stageMedia = $("stage-media");
+const pointers = new Map<number, { x: number; y: number }>();
+let zoom = 1;
+let panX = 0;
+let panY = 0;
+let zooming = false;
+let pinch = { dist: 1, zoom0: 1, lx: 0, ly: 0, rl: 0, rt: 0 };
+
+function applyZoom(): void {
+  stageMedia.style.transform = zoom === 1 && panX === 0 && panY === 0
+    ? ""
+    : `translate(${panX}px, ${panY}px) scale(${zoom})`;
+}
+function resetZoom(): void {
+  zoom = 1;
+  panX = 0;
+  panY = 0;
+  applyZoom();
+}
+function clampPan(): void {
+  const sw = stage.clientWidth;
+  const sh = stage.clientHeight;
+  panX = Math.min(0, Math.max(sw * (1 - zoom), panX));
+  panY = Math.min(0, Math.max(sh * (1 - zoom), panY));
+}
+function pinchStart(): void {
+  const pts = [...pointers.values()];
+  if (pts.length < 2) return;
+  const [a, b] = pts;
+  const rect = stage.getBoundingClientRect();
+  const mx = (a.x + b.x) / 2 - rect.left;
+  const my = (a.y + b.y) / 2 - rect.top;
+  pinch = {
+    dist: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y)),
+    zoom0: zoom,
+    lx: (mx - panX) / zoom, // the media-local point under the pinch midpoint
+    ly: (my - panY) / zoom,
+    rl: rect.left,
+    rt: rect.top,
+  };
+  zooming = true;
+}
+function pinchMove(): void {
+  const pts = [...pointers.values()];
+  if (pts.length < 2) return;
+  const [a, b] = pts;
+  const dist = Math.hypot(b.x - a.x, b.y - a.y);
+  const mx = (a.x + b.x) / 2 - pinch.rl;
+  const my = (a.y + b.y) / 2 - pinch.rt;
+  zoom = Math.min(6, Math.max(1, (pinch.zoom0 * dist) / pinch.dist));
+  panX = mx - pinch.lx * zoom; // keep the same media point under the moving midpoint
+  panY = my - pinch.ly * zoom;
+  if (zoom <= 1.01) resetZoom();
+  else {
+    clampPan();
+    applyZoom();
+  }
+}
+
 function bindDrag(): void {
   dragSurface.style.touchAction = "none";
   dragSurface.addEventListener("pointerdown", (e) => {
     if (!editor.ready) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try {
+      dragSurface.setPointerCapture(e.pointerId);
+    } catch {
+      /* fine */
+    }
+    if (pointers.size >= 2) {
+      // a second finger → pinch/pan; abandon any in-progress single-finger tool action
+      dragging = false;
+      dragSurface.classList.remove("dragging");
+      pinchStart();
+      return;
+    }
     e.preventDefault();
     dragging = true;
     moved = false;
@@ -403,29 +482,33 @@ function bindDrag(): void {
     dragStartVal = state[activeKey];
     // touching the image dismisses the floating instructions so the photo is unobstructed
     dragSurface.classList.add("dismissed");
-    try {
-      dragSurface.setPointerCapture(e.pointerId);
-    } catch {
-      /* fine */
-    }
     if (!activeTool.erase) setTicker(state[activeKey]);
   });
 
   dragSurface.addEventListener("pointermove", (e) => {
+    const p = pointers.get(e.pointerId);
+    if (p) {
+      p.x = e.clientX;
+      p.y = e.clientY;
+    }
+    if (zooming || pointers.size >= 2) {
+      pinchMove();
+      return;
+    }
     if (!dragging) return;
     if (!moved && Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) > 3) moved = true;
 
     if (activeTool.erase) {
       if (!moved) return; // a drag = brush; a still tap = SAM2 select (on pointerup)
       const { nx, ny } = normOf(e);
-      eraseSel.paint(nx, ny, BRUSH_FRAC, !strokePainted);
+      eraseSel.paint(nx, ny, brushFrac(), brushHardness, !strokePainted);
       strokePainted = true;
       return;
     }
 
     if (activeTool.refine) {
       const { nx, ny } = normOf(e); // paint even on a tap-dab, then commit on lift
-      editor.paintRefine(nx, ny, BRUSH_FRAC, refineMode);
+      editor.paintRefine(nx, ny, brushFrac(), refineMode);
       editor.drawRefineOverlay(eraseLayer);
       strokePainted = true;
       return;
@@ -452,6 +535,13 @@ function bindDrag(): void {
   });
 
   const end = (e: PointerEvent) => {
+    pointers.delete(e.pointerId);
+    if (zooming) {
+      // a pinch finger lifted; stay out of tool mode until all fingers are up (avoids a stray brush)
+      if (pointers.size < 2) zooming = false;
+      dragging = false;
+      return;
+    }
     if (!dragging) return;
     dragging = false;
     dragSurface.classList.remove("dragging"); // hide the odometer; label stays dismissed
@@ -470,7 +560,7 @@ function bindDrag(): void {
     if (activeTool.refine) {
       if (!strokePainted) {
         const { nx, ny } = normOf(e); // a tap paints one dab
-        editor.paintRefine(nx, ny, BRUSH_FRAC, refineMode);
+        editor.paintRefine(nx, ny, brushFrac(), refineMode);
         editor.drawRefineOverlay(eraseLayer);
       }
       editor.commit(); // recompute once, then render with the refined depth
@@ -495,15 +585,34 @@ function buildEraseActions(): void {
     b.addEventListener("click", on);
     return b;
   };
+  // target toggle: which layer the erase is allowed to touch
+  const targets: [typeof eraseTarget, string][] = [
+    ["auto", "Auto"],
+    ["background", "Bg"],
+    ["subject", "Subject"],
+  ];
+  for (const [t, label] of targets) {
+    const chip = mk(label, "", () => {
+      eraseTarget = t;
+      subrow.querySelectorAll<HTMLButtonElement>(".chip[data-target]").forEach((c) =>
+        c.setAttribute("aria-pressed", String(c.dataset.target === t)),
+      );
+    });
+    chip.dataset.target = t;
+    chip.setAttribute("aria-pressed", String(t === eraseTarget));
+    subrow.appendChild(chip);
+  }
   subrow.appendChild(mk("Undo", "", () => eraseSel.undo()));
-  subrow.appendChild(mk("Clear", "", () => eraseSel.clear()));
-  subrow.appendChild(mk("Erase", "erase-go", () => void doErase()));
+  const erase = mk("Erase", "erase-go", () => void doErase());
+  erase.style.marginLeft = "auto";
+  subrow.appendChild(erase);
 }
 
 function buildRefineActions(): void {
   const modes: [typeof refineMode, string][] = [
     ["sharpen", "Sharpen"],
     ["recede", "Blur"],
+    ["dissolve", "Dissolve"],
   ];
   for (const [m, label] of modes) {
     const chip = document.createElement("button");
@@ -574,7 +683,7 @@ async function doErase(): Promise<void> {
   setProgress("Erasing…");
   try {
     const mask = await eraseSel.exportPng();
-    await eraseObject(analyzeId, mask);
+    await eraseObject(analyzeId, mask, eraseTarget);
     dataVersion++;
     // the scene changed — reload depth/matte and the cleaned source photo
     await editor.load(depthUrl(analyzeId, dataVersion), matteUrl(analyzeId, dataVersion));
@@ -674,6 +783,7 @@ async function acceptFile(file: File): Promise<void> {
   originalUrl = URL.createObjectURL(file);
   analyzeId = null;
   dataVersion = 0;
+  resetZoom();
   resultImg.src = originalUrl;
   resultImg.classList.remove("hidden");
   dropzone.classList.add("hidden");
@@ -778,6 +888,12 @@ dropzone.addEventListener("drop", (e) => {
   if (f) void acceptFile(f);
 });
 saveBtn.addEventListener("click", save);
+
+// brush size / hardness
+const brushSizeInput = $("brush-size") as HTMLInputElement;
+const brushHardnessInput = $("brush-hardness") as HTMLInputElement;
+brushSizeInput.addEventListener("input", () => (brushSize = Number(brushSizeInput.value)));
+brushHardnessInput.addEventListener("input", () => (brushHardness = Number(brushHardnessInput.value) / 100));
 
 buildTicker();
 buildTabs();

@@ -194,7 +194,8 @@ export class DepthEditor {
     }
 
     // 4) spot refinement overrides (persist across slider edits). +1 → in focus (sharp);
-    //    -1 → max blur, keeping the near/far side so occlusion ordering is preserved.
+    //    -1 → max blur (keeps near/far side for occlusion); +2 → dissolve: force to a near-occluder
+    //    depth so the renderer scatters it as its own spreading soft-alpha layer (melts thin junk).
     for (let i = 0; i < n; i++) {
       if (this.refine[i] === 1) {
         this.focus[i] = 1;
@@ -202,13 +203,21 @@ export class DepthEditor {
       } else if (this.refine[i] === -1) {
         this.focus[i] = 0;
         this.edited[i] = this.rawDepth[i] >= s ? 1.0 : 0.0;
+      } else if (this.refine[i] === 2) {
+        this.focus[i] = 0;
+        this.edited[i] = 0.95; // near-occluder → foreground occluder layer spreads it away
       }
     }
   }
 
-  /** Paint a spot refinement (disc, nx/ny normalized). mode: sharpen (+1) / recede (-1) / clear (0). */
-  paintRefine(nx: number, ny: number, radiusFrac: number, mode: "sharpen" | "recede" | "clear"): void {
-    const val = mode === "sharpen" ? 1 : mode === "recede" ? -1 : 0;
+  /** Paint a spot refinement (disc). mode: sharpen (+1) / recede (-1) / dissolve (+2) / clear (0). */
+  paintRefine(
+    nx: number,
+    ny: number,
+    radiusFrac: number,
+    mode: "sharpen" | "recede" | "dissolve" | "clear",
+  ): void {
+    const val = mode === "sharpen" ? 1 : mode === "recede" ? -1 : mode === "dissolve" ? 2 : 0;
     const cx = nx * this.w;
     const cy = ny * this.h;
     const r = Math.max(2, radiusFrac * Math.max(this.w, this.h));
@@ -255,6 +264,11 @@ export class DepthEditor {
         img.data[i * 4] = 207;
         img.data[i * 4 + 1] = 138;
         img.data[i * 4 + 2] = 95; // --accent terracotta
+        img.data[i * 4 + 3] = 120;
+      } else if (v === 2) {
+        img.data[i * 4] = 168;
+        img.data[i * 4 + 1] = 120;
+        img.data[i * 4 + 2] = 200; // violet = dissolve
         img.data[i * 4 + 3] = 120;
       }
     }

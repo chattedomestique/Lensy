@@ -133,11 +133,17 @@ export async function selectSubject(
   }
 }
 
-/** Erase the masked region on the source and re-derive matte + depth. Resolves when done. */
-export async function eraseObject(analyzeId: string, maskPng: Blob): Promise<void> {
+/** Erase the masked region on the source and re-derive matte + depth. Resolves when done.
+ * layer: "auto" | "subject" | "background" — restrict the erase to one side of the matte. */
+export async function eraseObject(
+  analyzeId: string,
+  maskPng: Blob,
+  layer: "auto" | "subject" | "background" = "auto",
+): Promise<void> {
   const form = new FormData();
   form.append("analyze_id", analyzeId);
   form.append("mask", maskPng, "mask.png");
+  form.append("layer", layer);
   const r = await fetch(apiUrl("/erase"), { method: "POST", body: form });
   if (!r.ok) {
     const b = await r.json().catch(() => ({}));

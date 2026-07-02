@@ -133,6 +133,13 @@ html, body {
 }
 canvas.stage-img { image-rendering: auto; }
 .erase-layer { pointer-events: none; }
+/* media wrapper — pinch-zoom / pan transform applies here so image + overlays move together */
+.stage-media {
+  position: absolute; inset: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+  touch-action: none;
+}
 
 /* dropzone (empty state) */
 .dropzone {
@@ -267,6 +274,15 @@ canvas.stage-img { image-rendering: auto; }
   background: var(--accent); border-color: var(--accent); font-weight: 600;
 }
 .chip.erase-go:active { transform: translateY(1px) scale(0.99); }
+
+/* brush size / hardness bar (shown for brush tools) */
+.brush-bar {
+  display: flex; gap: var(--s4); align-items: center;
+  padding: var(--s2) var(--s4) 0;
+}
+.brush-ctl { flex: 1; display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.brush-ctl span { font-size: 11px; color: var(--subtle); letter-spacing: 0.02em; width: 30px; flex: none; }
+.brush-ctl input[type="range"] { flex: 1; }
 
 .tabbar {
   display: flex; gap: 1px;

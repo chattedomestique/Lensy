@@ -66,22 +66,27 @@ export class EraseSelection {
     this.redraw();
   }
 
-  /** Brush: paint a filled disc (nx,ny normalized; radiusFrac of the long edge). */
-  paint(nx: number, ny: number, radiusFrac: number, startStroke: boolean): void {
+  /** Brush: paint a disc with a soft edge. radiusFrac of the long edge; hardness 0 (very soft) →
+   * 1 (hard). The mask holds 0..255 so soft edges carry through to the overlay and export. */
+  paint(nx: number, ny: number, radiusFrac: number, hardness: number, startStroke: boolean): void {
     if (startStroke) this.snapshot();
     const cx = nx * this.w;
     const cy = ny * this.h;
     const r = Math.max(2, radiusFrac * Math.max(this.w, this.h));
-    const r2 = r * r;
+    const inner = r * Math.min(1, Math.max(0, hardness)); // full-strength core
     const x0 = Math.max(0, Math.floor(cx - r));
     const x1 = Math.min(this.w - 1, Math.ceil(cx + r));
     const y0 = Math.max(0, Math.floor(cy - r));
     const y1 = Math.min(this.h - 1, Math.ceil(cy + r));
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
-        const dx = x - cx;
-        const dy = y - cy;
-        if (dx * dx + dy * dy <= r2) this.mask[y * this.w + x] = 255;
+        const d = Math.hypot(x - cx, y - cy);
+        if (d > r) continue;
+        let a = d <= inner ? 1 : 1 - (d - inner) / Math.max(r - inner, 1e-3);
+        a = a * a * (3 - 2 * a); // smoothstep
+        const v = (a * 255) | 0;
+        const i = y * this.w + x;
+        if (v > this.mask[i]) this.mask[i] = v;
       }
     }
     this.redraw();
@@ -98,7 +103,7 @@ export class EraseSelection {
         img.data[i * 4] = r;
         img.data[i * 4 + 1] = g;
         img.data[i * 4 + 2] = b;
-        img.data[i * 4 + 3] = 120;
+        img.data[i * 4 + 3] = (this.mask[i] * 0.55) | 0; // soft edges show through
       }
     }
     ctx.putImageData(img, 0, 0);
@@ -112,7 +117,7 @@ export class EraseSelection {
     const ctx = c.getContext("2d")!;
     const img = ctx.createImageData(this.w, this.h);
     for (let i = 0; i < this.w * this.h; i++) {
-      const v = this.mask[i] ? 255 : 0;
+      const v = this.mask[i];
       img.data[i * 4] = v;
       img.data[i * 4 + 1] = v;
       img.data[i * 4 + 2] = v;

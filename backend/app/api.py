@@ -259,6 +259,7 @@ async def erase_object(
     request: Request,
     analyze_id: str = Form(...),
     mask: UploadFile = File(...),  # grayscale PNG, white = erase
+    layer: str = Form("auto"),     # "auto" | "subject" | "background" — where the erase may act
 ) -> JSONResponse:
     """Fill the masked region plausibly (LaMa) and re-derive matte + depth on the cleaned image.
     The analysis is updated in place; the client then reloads depth/matte/photo and re-renders."""
@@ -280,6 +281,16 @@ async def erase_object(
         return _friendly(400, "empty_mask", "Nothing was selected to erase.")
 
     mask_u8 = (np.clip(m01, 0, 1) * 255).astype(np.uint8)
+    # layer toggle: keep the erase on one side of the matte so it can't bleed across — e.g. erase a
+    # wire behind a head (background) without touching the head, or a blemish on skin (subject)
+    # without pulling in background.
+    if layer in ("subject", "background") and a.alpha is not None:
+        sub = a.alpha > 0.5
+        keep = sub if layer == "subject" else ~sub
+        mask_u8 = np.where(keep, mask_u8, np.uint8(0))
+        if int((mask_u8 > 127).sum()) == 0:
+            return _friendly(400, "empty_mask", f"Nothing on the {layer} to erase there.")
+
     params = RenderParams(working_res=max(h, w))  # already at working res — don't downscale
     loop = asyncio.get_running_loop()
     try:
@@ -287,7 +298,9 @@ async def erase_object(
     except Exception as e:  # noqa: BLE001
         log.exception("erase failed")
         return _friendly(500, "erase_failed", f"{e.__class__.__name__}: {e}")
-    a.work, a.alpha, a.depth = cleaned, alpha, depth
+    a.work, a.depth = cleaned, depth
+    a.matte_full = alpha
+    a.alpha = restrict_matte(alpha, a.subject_sel) if a.subject_sel is not None else alpha
     a.fg = None  # invalidate the precompose cache — the scene changed
     a.clean_bg = None
     return JSONResponse({"ok": True, "width": w, "height": h})
