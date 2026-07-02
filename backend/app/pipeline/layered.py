@@ -266,6 +266,55 @@ def _apply_distortion(img_u8: np.ndarray, amount: float) -> np.ndarray:
     return cv2.remap(img_u8, srcx, srcy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT101)
 
 
+def _dilate_coc(radius_px: np.ndarray) -> np.ndarray:
+    """Spread the circle-of-confusion ACROSS depth edges so a differently-blurred neighbour can't
+    leave a hard 'field-border' line, and a thin sharp feature sitting in a blurred region inherits
+    its neighbours' blur instead of staying at radius 0 (GPU Gems 3 ch.28 / Hammon: take the larger
+    of a pixel's own CoC and its dilated CoC). A morphological max over a modest window bridges the
+    hard step; a light blur of the result keeps the ramp smooth. Local — does not globally over-blur."""
+    if float(radius_px.max()) < 1.5:
+        return radius_px
+    h, w = radius_px.shape[:2]
+    win = max(3, (min(h, w) // 90) | 1)  # ~edge-bridging window, not the whole frame
+    dil = cv2.dilate(radius_px, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (win, win)))
+    # raise each pixel toward the local max, but only partway, then soften the CoC ramp
+    spread = 0.6 * dil + 0.4 * radius_px
+    return cv2.GaussianBlur(np.maximum(radius_px, spread), (0, 0), sigmaX=max(2.0, win / 3.0)).astype(np.float32)
+
+
+def _near_foreground_alpha(
+    signal: np.ndarray, focus: float, metric: bool, a_sub: np.ndarray
+) -> np.ndarray:
+    """Soft coverage of NEAR-foreground occluders: non-subject pixels meaningfully closer than the
+    focal plane (a pole by the lens, a near railing, etc.). These need to be blurred as their own
+    layer that *spreads* over what's behind — otherwise they stay hard-edged in the flat plate."""
+    h, w = signal.shape[:2]
+    if metric:  # metres: nearer = smaller
+        near = (signal < float(focus) * 0.8).astype(np.float32)
+    else:  # normalized disparity: nearer = larger
+        near = (signal > float(focus) + 0.12).astype(np.float32)
+    near = near * (1.0 - a_sub)  # never the subject
+    if float(near.sum()) < 1.0:
+        return near
+    k = max(3, (min(h, w) // 200) | 1)
+    near = cv2.morphologyEx(near, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    near = cv2.GaussianBlur(near, (0, 0), sigmaX=max(1.5, min(h, w) / 400.0))
+    return np.clip(near, 0.0, 1.0)
+
+
+def _inpaint_behind(bg_u8: np.ndarray, near_a: np.ndarray) -> np.ndarray:
+    """Fill the far plate where a near occluder sits, so revealing behind its blurred edge shows
+    clean background — not a copy of the occluder. Seen only blurred, so cheap Telea inpaint is fine."""
+    mask = (near_a > 0.15).astype(np.uint8) * 255
+    grow = max(3, min(bg_u8.shape[:2]) // 100)
+    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
+    if int(mask.sum()) == 0:
+        return bg_u8
+    bgr = cv2.cvtColor(bg_u8, cv2.COLOR_RGB2BGR)
+    filled = cv2.inpaint(bgr, mask, max(3, grow), cv2.INPAINT_TELEA)
+    return cv2.cvtColor(filled, cv2.COLOR_BGR2RGB)
+
+
 def render_layered_dof(
     fg_srgb: np.ndarray,
     alpha: np.ndarray,
@@ -278,10 +327,17 @@ def render_layered_dof(
 ) -> np.ndarray:
     """Full occlusion-aware render → final uint8 sRGB image."""
     h, w = alpha.shape[:2]
+    a_sub = np.clip(alpha, 0.0, 1.0).astype(np.float32)
+    # near-foreground occluders get pulled out of the flat plate and rendered as a spreading layer
+    near_a = _near_foreground_alpha(bg_signal, focus, metric, a_sub)
+    has_near = float(near_a.sum()) > (0.0006 * h * w)
 
     # --- background sheet (opaque, complete via inpaint) ---
-    bg_lin = srgb_to_linear(clean_bg_u8.astype(np.float32) / 255.0)
-    bg_radius = focal_radius(bg_signal, focus, metric, p)
+    # if there are near occluders, remove them from the FAR plate (+ fill behind) so the sheet is
+    # clean background; the occluders themselves are rendered as a separate spreading layer below.
+    far_bg_u8 = _inpaint_behind(clean_bg_u8, near_a) if has_near else clean_bg_u8
+    bg_lin = srgb_to_linear(far_bg_u8.astype(np.float32) / 255.0)
+    bg_radius = _dilate_coc(focal_radius(bg_signal, focus, metric, p))  # thin features inherit neighbour blur
     bg_coord = _layer_coord(bg_signal, metric)
     excess = np.clip(bg_lin - _HI_THRESH, 0.0, None) if p.highlight_boost > 0 else None
     bgc, bga, bgbloom = render_sheet(bg_lin, np.ones((h, w), np.float32), bg_coord, bg_radius, p, excess)
@@ -323,8 +379,19 @@ def render_layered_dof(
         fga = _var_radial_blur(fga[..., 0], amt, max_sig)[..., None]
         bg_rendered = _var_radial_blur(bg_rendered, amt, max_sig)
 
-    # --- compose foreground OVER background (premultiplied) ---
+    # --- compose subject OVER background (premultiplied) ---
     out_lin = fgc + bg_rendered * (1.0 - fga)
+
+    # --- near-foreground occluder layer: scatter the occluders with their soft alpha and composite
+    # OVER everything, so their edges bloom outward (true foreground bokeh, revealing the clean far
+    # plate + subject behind) instead of sitting as a hard line in the flat background sheet. ---
+    if has_near:
+        near_lin = srgb_to_linear(clean_bg_u8.astype(np.float32) / 255.0)  # original: still has them
+        near_radius = _dilate_coc(focal_radius(bg_signal, focus, metric, p))
+        near_coord = _layer_coord(bg_signal, metric)
+        nc, na, _ = render_sheet(near_lin, near_a, near_coord, near_radius, p, None)
+        out_lin = nc + out_lin * (1.0 - np.clip(na, 0.0, 1.0))
+
     # glows in linear light, before tonemap, so the spill stays bright
     if p.highlight_boost > 0:  # neutral bloom across the frame
         out_lin = _apply_bloom(out_lin, p.highlight_boost)
