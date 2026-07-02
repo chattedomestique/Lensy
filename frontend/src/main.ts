@@ -183,14 +183,41 @@ function hideDepthLive(): void {
 }
 
 // ---- tab bar + sub-parameter row ----
+// Lean linear glyphs per tool (§5). currentColor stroke; the active tab brightens + underlines.
+const SVG = (inner: string) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${inner}</svg>`;
+const DOT = '<circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/>';
+const ICONS: Record<string, string> = {
+  // stacked planes = depth layers
+  depth: SVG('<rect x="3.5" y="3.5" width="12" height="12" rx="2.5"/><rect x="8.5" y="8.5" width="12" height="12" rx="2.5"/>'),
+  // out-of-focus bokeh balls
+  bokeh: SVG('<circle cx="9" cy="10" r="4.3"/><circle cx="16.5" cy="14.5" r="3"/><circle cx="15.5" cy="7" r="1.8"/>'),
+  // highlight starburst
+  bloom: SVG(`${DOT}<path d="M12 3.5v2.5M12 18v2.5M3.5 12H6M18 12h2.5M6 6l1.7 1.7M16.3 16.3 18 18M18 6l-1.7 1.7M7.7 16.3 6 18"/>`),
+  // highlight with a glow ring
+  halation: SVG(`${DOT}<circle cx="12" cy="12" r="7"/>`),
+  // offset rings = channel fringing
+  chroma: SVG('<circle cx="9.5" cy="12" r="6"/><circle cx="14.5" cy="12" r="6"/>'),
+  // swirl
+  petzval: SVG('<path d="M12 4a8 8 0 1 1-7.6 5.6"/><path d="M12 8.2a3.8 3.8 0 1 0 3.6 2.7"/>'),
+  // sweet-spot reticle
+  lensbaby: SVG(`<circle cx="12" cy="12" r="8"/>${DOT}`),
+  // refine sparkle
+  refine: SVG('<path d="M12 3.5l1.9 4.6L18.5 10l-4.6 1.9L12 16.5l-1.9-4.6L5.5 10l4.6-1.9z"/><path d="M18.5 16.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>'),
+  // eraser
+  erase: SVG('<path d="M4.5 15.5 12 8l4.5 4.5L11 18H6.5z"/><path d="M9 20h10"/>'),
+};
+
 function buildTabs(): void {
   tabbar.innerHTML = "";
   for (const t of TOOLS) {
     const b = document.createElement("button");
     b.className = "tab";
-    b.textContent = t.label;
+    b.innerHTML = ICONS[t.id] ?? t.label;
     b.dataset.tool = t.id;
     b.setAttribute("role", "tab");
+    b.setAttribute("aria-label", t.label);
+    b.title = t.label;
     b.addEventListener("click", () => selectTool(t));
     tabbar.appendChild(b);
   }
