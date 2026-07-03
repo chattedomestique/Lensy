@@ -375,6 +375,19 @@ def render_layered_dof(
     far_bg_u8 = _inpaint_behind(clean_bg_u8, near_a) if has_near else clean_bg_u8
     bg_lin = srgb_to_linear(far_bg_u8.astype(np.float32) / 255.0)
     bg_radius = _dilate_coc(focal_radius(bg_signal, focus, metric, p))  # thin features inherit neighbour blur
+    # Portrait blur FLOOR. The subject is defined by the MATTE, not by depth — so a *background*
+    # object that happens to sit at the subject's focal distance (another person a step behind, a
+    # railing) gets CoC≈0 and stays tack-sharp at ANY blur strength, reading as a hard cutout/line
+    # the blur slider can't remove. Give the background a minimum blur that ramps up with distance
+    # from the subject: the ground right at the feet stays naturally sharp, but anything set apart
+    # from the subject always softens. Scales with the blur slider so low K stays subtle.
+    if p.k > 0:
+        sub_m = (a_sub > 0.5).astype(np.uint8)
+        if sub_m.any() and int(sub_m.sum()) < int(0.97 * h * w):
+            dist = cv2.distanceTransform(1 - sub_m, cv2.DIST_L2, 5)
+            ramp = np.clip((dist / (0.09 * float(np.hypot(h, w))) - 0.15) / 0.85, 0.0, 1.0)
+            floor = (p.k / 100.0) * (min(h, w) / 60.0) * ramp  # ~21px far away at k=100 on a 1290px frame
+            bg_radius = np.maximum(bg_radius, floor.astype(np.float32))
     bg_coord = _layer_coord(bg_signal, metric)
     excess = np.clip(bg_lin - _HI_THRESH, 0.0, None) if p.highlight_boost > 0 else None
     bgc, bga, bgbloom = render_sheet(bg_lin, np.ones((h, w), np.float32), bg_coord, bg_radius, p, excess)
