@@ -268,6 +268,34 @@ def _apply_distortion(img_u8: np.ndarray, amount: float) -> np.ndarray:
     return cv2.remap(img_u8, srcx, srcy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT101)
 
 
+def _fill_sharp_islands(radius_px: np.ndarray, a_sub: np.ndarray) -> np.ndarray:
+    """Kill SHARP ISLANDS in the background CoC map: a background region that is sharp (low CoC)
+    but ringed by heavy blur — a bystander/pole standing at the subject's focal distance — renders
+    as a hard-edged sharp patch floating in the blur (the "hard stop, zero falloff"). Depth can't
+    fix it (the object really is at the focal plane) and a distance floor can't (it's adjacent to
+    the subject). But it's obviously wrong for a portrait: nothing in the *background* should stay
+    tack-sharp while everything around it is blurred.
+
+    So detect pixels whose surroundings are much blurrier than they are, and raise them toward the
+    surrounding blur — smooth falloff, no hard edge. The SUBJECT is composited from a SEPARATE sharp
+    layer and never reads this map, so this can't soften the subject. The ground at the subject's
+    feet is a low-CoC region CONNECTED to the near field (it grades to blur), not an enclosed island,
+    so the surrounding-blur estimate there is itself low and it's left alone."""
+    if float(radius_px.max()) < 3.0:
+        return radius_px
+    h, w = radius_px.shape
+    # "typical blur a little way out" from each pixel: a grey close bridges gaps up to the kernel,
+    # so an enclosed sharp island takes its ring's (high) value while an open sharp field keeps its
+    # own (low) value.
+    k = int(np.clip(np.percentile(radius_px, 80), 12, min(h, w) // 6)) | 1
+    surround = cv2.morphologyEx(radius_px, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    # only raise where the surroundings are genuinely blurrier (an island); ramp in softly so we
+    # don't introduce a new step at the fill boundary.
+    fill = np.maximum(radius_px, surround - 0.10 * float(radius_px.max()))
+    out = np.maximum(radius_px, np.minimum(fill, surround))
+    return cv2.GaussianBlur(out, (0, 0), sigmaX=max(3.0, k / 3.5)).astype(np.float32)
+
+
 def _dilate_coc(radius_px: np.ndarray) -> np.ndarray:
     """Spread the circle-of-confusion ACROSS depth edges so a differently-blurred neighbour can't
     leave a hard 'field-border' line, and a thin sharp feature sitting in a blurred region inherits
@@ -375,19 +403,7 @@ def render_layered_dof(
     far_bg_u8 = _inpaint_behind(clean_bg_u8, near_a) if has_near else clean_bg_u8
     bg_lin = srgb_to_linear(far_bg_u8.astype(np.float32) / 255.0)
     bg_radius = _dilate_coc(focal_radius(bg_signal, focus, metric, p))  # thin features inherit neighbour blur
-    # Portrait blur FLOOR. The subject is defined by the MATTE, not by depth — so a *background*
-    # object that happens to sit at the subject's focal distance (another person a step behind, a
-    # railing) gets CoC≈0 and stays tack-sharp at ANY blur strength, reading as a hard cutout/line
-    # the blur slider can't remove. Give the background a minimum blur that ramps up with distance
-    # from the subject: the ground right at the feet stays naturally sharp, but anything set apart
-    # from the subject always softens. Scales with the blur slider so low K stays subtle.
-    if p.k > 0:
-        sub_m = (a_sub > 0.5).astype(np.uint8)
-        if sub_m.any() and int(sub_m.sum()) < int(0.97 * h * w):
-            dist = cv2.distanceTransform(1 - sub_m, cv2.DIST_L2, 5)
-            ramp = np.clip((dist / (0.09 * float(np.hypot(h, w))) - 0.15) / 0.85, 0.0, 1.0)
-            floor = (p.k / 100.0) * (min(h, w) / 60.0) * ramp  # ~21px far away at k=100 on a 1290px frame
-            bg_radius = np.maximum(bg_radius, floor.astype(np.float32))
+    bg_radius = _fill_sharp_islands(bg_radius, a_sub)  # kill sharp background patches floating in blur
     bg_coord = _layer_coord(bg_signal, metric)
     excess = np.clip(bg_lin - _HI_THRESH, 0.0, None) if p.highlight_boost > 0 else None
     bgc, bga, bgbloom = render_sheet(bg_lin, np.ones((h, w), np.float32), bg_coord, bg_radius, p, excess)
