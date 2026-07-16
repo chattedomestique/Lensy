@@ -378,24 +378,31 @@ def _has_character(p: BlurParams) -> bool:
 
 
 def _finish(out_lin: np.ndarray, p: BlurParams) -> np.ndarray:
-    """Shared tail: the non-DoF character effects on a composited linear-light frame → uint8 sRGB.
-    Glows run in linear light (before tonemap) so the spill stays bright; the geometric optics
-    (chromatic aberration, distortion) and film grain are last, on the encoded frame."""
+    """Glows (linear light, before tonemap, so the spill stays bright) → tonemap → encode to uint8
+    sRGB. The output-medium passes (chromatic aberration, distortion, grain) are applied separately
+    by `_output_optics` at the FINAL export resolution — see there for why."""
     if p.highlight_boost > 0:  # neutral bloom across the frame
         out_lin = _apply_bloom(out_lin, p.highlight_boost)
     if p.halation > 0:  # warm red-orange glow out of the highlights only
         out_lin = _apply_halation(out_lin, p.halation, p.halation_size)
     out_lin = tonemap_highlights(out_lin)
-    out = (np.clip(linear_to_srgb(out_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    return (np.clip(linear_to_srgb(out_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+def _output_optics(out_u8: np.ndarray, p: BlurParams) -> np.ndarray:
+    """Geometric lens optics + film grain — the very last passes, applied at the FINAL export
+    resolution. Grain is modeled per output pixel (crystalline at any size), and CA/distortion are
+    radial remaps; running them here keeps grain crisp and the remaps precise even when a working-res
+    render was upscaled for a full-res export (otherwise the grain gets stretched and blurred)."""
     if p.ca > 0:  # lateral chromatic aberration — per-channel magnification
-        out = _apply_ca(out, p.ca)
+        out_u8 = _apply_ca(out_u8, p.ca)
     if p.distortion > 0:  # barrel lens distortion
-        out = _apply_distortion(out, p.distortion)
-    if p.grain > 0:  # modeled film grain — the very last pass, on the final frame
+        out_u8 = _apply_distortion(out_u8, p.distortion)
+    if p.grain > 0:  # modeled film grain
         from .grain import apply_grain
 
-        out = apply_grain(out, p.grain, p.grain_size, p.grain_seed)
-    return out
+        out_u8 = apply_grain(out_u8, p.grain, p.grain_size, p.grain_seed)
+    return out_u8
 
 
 def _composite_full_res(
@@ -455,9 +462,9 @@ def _composite_full_res(
     orig_lin = srgb_to_linear(orig_u8.astype(np.float32) / 255.0)
     bg_full = bg_full * (1.0 - sharp_full) + orig_lin * sharp_full
 
-    # 4) premultiplied subject OVER background
+    # 4) premultiplied subject OVER background (both optics + grain applied at this full res)
     out_lin = fg_full_lin * a_full + bg_full * (1.0 - a_full)
-    return _finish(out_lin, p)
+    return _output_optics(_finish(out_lin, p), p)
 
 
 def render_layered_dof(
@@ -503,7 +510,7 @@ def render_layered_dof(
         base = orig_srgb if full_wh is not None else work_srgb
         if not _has_character(p):
             return base.copy()  # pristine: untouched source pixels, no sRGB round-trip loss
-        return _finish(srgb_to_linear(base.astype(np.float32) / 255.0), p)
+        return _output_optics(_finish(srgb_to_linear(base.astype(np.float32) / 255.0), p), p)
     # (no source image handed in — fall through: at zero CoC the normal composite below reconstructs
     #  the sharp subject over the clean background, which is the correct sharp image anyway.)
     # Near-foreground occluders (a pole/railing right by the lens): the unified back-to-front sheet
@@ -597,10 +604,12 @@ def render_layered_dof(
         nc, na, _ = render_sheet(near_lin, near_a, near_coord, near_radius, p, None)
         out_lin = nc + out_lin * (1.0 - np.clip(na, 0.0, 1.0))
 
-    # non-DoF character effects (bloom / halation / chroma / distortion / grain), then encode
+    # glows + tonemap + encode (bloom/halation are low-frequency, so upscaling them is fine)
     out = _finish(out_lin, p)
     # non-simple cases (Lensbaby / subject DoF / near-occluder layer) render at working res; upscale
-    # to the original resolution so the exported image is still full-size.
+    # to the original resolution so the export is full-size...
     if full_wh is not None and (full_wh[0] != w or full_wh[1] != h):
         out = cv2.resize(out, full_wh, interpolation=cv2.INTER_CUBIC)
-    return out
+    # ...then apply grain + geometric optics at that FINAL resolution so grain stays crisp (not a
+    # stretched upscale) and the remaps are precise.
+    return _output_optics(out, p)
