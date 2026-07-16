@@ -619,6 +619,16 @@ def render_layered_dof(
         nc, na, _ = render_sheet(near_lin, near_a, near_coord, near_radius, p, None)
         out_lin = nc + out_lin * (1.0 - np.clip(na, 0.0, 1.0))
 
+    # defocus mask for the optional grain-in-blur blend. Start from the DoF circle of confusion,
+    # then fold in the non-DoF blur effects that this (fallback) path renders — the Lensbaby sweet
+    # spot and the Petzval swirl — so "grain only in the blurred parts" follows the ACTUAL blur, not
+    # just the depth of field (otherwise a k=0 Lensbaby shot, all blur and no CoC, would get no grain).
+    defocus = _defocus_mask(bg_radius, a_sub)
+    if p.sweet > 0:  # Lensbaby blurs radially from the spot, subject included → count the whole field
+        defocus = np.maximum(defocus, np.clip(amt / max(float(p.sweet), 1e-3), 0.0, 1.0))
+    if p.swirl > 0:  # Petzval tangential smear of the background, growing toward the frame edges
+        defocus = np.maximum(defocus, (1.0 - a_sub) * np.clip(_field(h, w)[0], 0.0, 1.0))
+
     # glows + tonemap + encode (bloom/halation are low-frequency, so upscaling them is fine)
     out = _finish(out_lin, p)
     # non-simple cases (Lensbaby / subject DoF / near-occluder layer) render at working res; upscale
@@ -627,4 +637,4 @@ def render_layered_dof(
         out = cv2.resize(out, full_wh, interpolation=cv2.INTER_CUBIC)
     # ...then apply grain + geometric optics at that FINAL resolution so grain stays crisp (not a
     # stretched upscale) and the remaps are precise. Grain can confine itself to the defocus.
-    return _output_optics(out, p, _defocus_mask(bg_radius, a_sub))
+    return _output_optics(out, p, defocus)

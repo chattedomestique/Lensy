@@ -82,6 +82,36 @@ def test_blur_off_keeps_depth_effects():
     assert not np.array_equal(grainy, plain)  # grain applied on the sharp full-res frame
 
 
+def test_grain_blend_confines_to_defocus():
+    """grain_blend=1 confines grain to the out-of-focus regions (sharp subject stays clean); at
+    grain_blend=0 the grain covers everything, subject included."""
+    h, w = 900, 1200
+    rng = np.random.default_rng(3)
+    photo = rng.integers(80, 110, size=(h, w, 3)).astype(np.uint8)  # flat so grain is measurable
+    yy, xx = np.mgrid[0:h, 0:w]
+    blob = ((xx - w // 2) ** 2 + (yy - h // 2) ** 2) < (min(h, w) // 6) ** 2
+    photo[blob] = [150, 140, 130]  # a sharp central "subject"
+    bundle = ModelBundle()
+
+    def render(blend, grain):
+        p = RenderParams(k=60, highlight_boost=0.0, grain=grain, grain_blend=blend, working_res=1024)
+        return run_pipeline(photo, p, bundle).astype(np.float32)
+
+    base = render(0.0, 0.0)  # ungrained reference
+
+    def rms(img, mask):
+        d = (img - base)[mask]
+        return float(np.sqrt((d * d).mean()))
+
+    everywhere = render(0.0, 0.9)
+    defocus_only = render(1.0, 0.9)
+    # grain-everywhere: the (sharp) subject gets grain too
+    assert rms(everywhere, blob) > 5.0
+    # defocus-only: the sharp subject stays essentially clean, the blurred background keeps grain
+    assert rms(defocus_only, blob) < 0.2 * rms(everywhere, blob)
+    assert rms(defocus_only, ~blob) > 3.0
+
+
 def test_max_blur_recalibrated_to_quarter():
     """UI K=100 now reaches a CoC ceiling of 2.75% of the diagonal — a quarter of the old 11%."""
     from app.pipeline.blur import BlurParams, focal_radius

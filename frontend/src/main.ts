@@ -154,6 +154,8 @@ let analyzeW = 0;
 let analyzeH = 0;
 let dataVersion = 0; // bumped after an erase so depth/matte/photo re-fetch past the cache
 let canUndo = false; // a processed erase is available to undo on the server
+let acceptGen = 0; // bumped per acceptFile() so an out-of-order analyze from a superseded photo bails
+let undoing = false; // re-entrancy guard so a double-tap of Undo can't fire two /undo posts
 let inflight: RenderHandle | null = null;
 let renderTimer: number | undefined;
 let rafPending = false;
@@ -731,7 +733,8 @@ async function doErase(): Promise<void> {
 
 // ---- undo a processed erase (server-side) ----
 async function undoErase(): Promise<void> {
-  if (!analyzeId || !canUndo) return;
+  if (!analyzeId || !canUndo || undoing) return; // guard against a double-tap firing two /undo posts
+  undoing = true;
   inflight?.cancel();
   setProgress("Undoing…");
   try {
@@ -751,6 +754,8 @@ async function undoErase(): Promise<void> {
   } catch (err) {
     setProgress("", false);
     toast(err instanceof ApiError ? err.message : "Couldn't undo.");
+  } finally {
+    undoing = false;
   }
 }
 
@@ -801,12 +806,12 @@ async function doRender(): Promise<void> {
   if (!currentFile || !analyzeId || !editor.ready) return;
   inflight?.cancel();
   setProgress("Rendering…");
+  let handle: RenderHandle | null = null;
   try {
     const depthPng = await editor.exportDepthPng();
-    inflight = renderFromAnalyze(analyzeId, depthPng, renderParams(), (p) =>
-      setProgress(p.label),
-    );
-    const url = await inflight.done;
+    handle = renderFromAnalyze(analyzeId, depthPng, renderParams(), (p) => setProgress(p.label));
+    inflight = handle;
+    const url = await handle.done;
     if (resultUrl) URL.revokeObjectURL(resultUrl);
     resultUrl = url;
     resultBlob = await (await fetch(url)).blob();
@@ -826,7 +831,7 @@ async function doRender(): Promise<void> {
       toast(err instanceof ApiError ? err.message : "Something went wrong rendering.");
     }
   } finally {
-    inflight = null;
+    if (inflight === handle) inflight = null; // don't clobber a newer render's handle
   }
 }
 
@@ -837,6 +842,7 @@ async function acceptFile(file: File): Promise<void> {
     return;
   }
   inflight?.cancel(); // a render from the previous photo must not paint over the new one
+  const gen = ++acceptGen; // if a newer photo is chosen (New) mid-analyze, this run must bail out
   currentFile = file;
   if (originalUrl) URL.revokeObjectURL(originalUrl);
   originalUrl = URL.createObjectURL(file);
@@ -860,10 +866,12 @@ async function acceptFile(file: File): Promise<void> {
   setProgress("Reading depth…");
   try {
     const { analyzeId: aid, width, height } = await analyze(file);
+    if (gen !== acceptGen) return; // a newer photo superseded this one — don't clobber its state
     analyzeId = aid;
     analyzeW = width;
     analyzeH = height;
     await editor.load(depthUrl(aid), matteUrl(aid));
+    if (gen !== acceptGen) return;
     editor.setSettings(depthSettings());
     setProgress("", false);
     dragSurface.classList.remove("hidden");
@@ -871,6 +879,7 @@ async function acceptFile(file: File): Promise<void> {
     void doRender(); // first render so lens tools have something to show
     toast("Drag up/down on the photo to adjust. Tabs switch tools.");
   } catch (err) {
+    if (gen !== acceptGen) return; // superseded — let the newer run own the UI
     setProgress("", false);
     dropzone.classList.remove("hidden");
     toast(err instanceof ApiError ? err.message : "Could not analyze the photo.");

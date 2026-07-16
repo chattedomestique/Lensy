@@ -478,12 +478,21 @@ async def start_render(
                 except Exception as e:  # noqa: BLE001
                     return _friendly(400, "bad_depth", f"could not read edited depth: {e}")
 
+        # Snapshot the scene HERE, on the event loop, so a concurrent /undo, /erase or /subject
+        # (which reassign a.work/a.alpha/a.fg on the event loop while this render runs in a worker
+        # thread) can't feed the worker a torn mix of buffers or poison the precompose cache. The
+        # render works entirely off this immutable snapshot; the cache is only written back if the
+        # analysis still points at the same scene when the slow precompose finishes.
+        s_work, s_alpha, s_orig = a.work, a.alpha, a.orig
+        s_fg, s_clean_bg = a.fg, a.clean_bg
+
         def do_render(progress):
-            if a.fg is None:  # lazy precompose on the first render, cached for later edits
-                a.fg, a.clean_bg = precompose(a.work, a.alpha, bundle)
-            return render_from(
-                a.work, a.alpha, a.fg, a.clean_bg, depth_map, params, progress, orig=a.orig
-            )
+            fg, clean_bg = s_fg, s_clean_bg
+            if fg is None:  # lazy precompose on the first render, cached for later edits
+                fg, clean_bg = precompose(s_work, s_alpha, bundle)
+                if a.work is s_work and a.alpha is s_alpha:  # scene unchanged → safe to cache
+                    a.fg, a.clean_bg = fg, clean_bg
+            return render_from(s_work, s_alpha, fg, clean_bg, depth_map, params, progress, orig=s_orig)
 
         return _spawn_render(request, do_render, icc=a.icc)
 
