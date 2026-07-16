@@ -53,6 +53,7 @@ class RenderParams:
     distortion: float = 0.0      # barrel lens distortion
     grain: float = 0.0           # modeled film grain
     grain_size: float = 0.4
+    grain_blend: float = 0.0     # 0 = grain everywhere → 1 = grain only in the defocused regions
     grain_seed: float = 0.37     # per-image; set from the analysis so edits don't reroll the grain
     working_res: int = 2048      # long-edge px the pipeline runs at
 
@@ -74,6 +75,7 @@ class RenderParams:
             distortion=self.distortion,
             grain=self.grain,
             grain_size=self.grain_size,
+            grain_blend=self.grain_blend,
             grain_seed=self.grain_seed,
         )
 

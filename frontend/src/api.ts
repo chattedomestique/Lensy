@@ -21,6 +21,7 @@ export interface RenderParams {
   distortion: number; // 0..1 barrel lens distortion
   grain: number; // 0..1 modeled film grain
   grain_size: number; // 0..1 grain cell character (fine → coarse)
+  grain_blend: number; // 0 = grain everywhere → 1 = grain only in the defocused parts
 }
 
 export interface ProgressEvent {
@@ -136,12 +137,13 @@ export async function selectSubject(
 }
 
 /** Erase the masked region on the source and re-derive matte + depth. Resolves when done.
- * layer: "auto" | "subject" | "background" — restrict the erase to one side of the matte. */
+ * layer: "auto" | "subject" | "background" — restrict the erase to one side of the matte.
+ * Returns whether the processed erase can now be undone. */
 export async function eraseObject(
   analyzeId: string,
   maskPng: Blob,
   layer: "auto" | "subject" | "background" = "auto",
-): Promise<void> {
+): Promise<{ canUndo: boolean }> {
   const form = new FormData();
   form.append("analyze_id", analyzeId);
   form.append("mask", maskPng, "mask.png");
@@ -151,6 +153,22 @@ export async function eraseObject(
     const b = await r.json().catch(() => ({}));
     throw new ApiError(b?.error?.message ?? `could not erase (${r.status})`);
   }
+  const d = await r.json().catch(() => ({}));
+  return { canUndo: Boolean(d?.can_undo) };
+}
+
+/** Undo the most recent processed erase on the server; restores the pre-erase scene.
+ * Returns whether more undos remain. */
+export async function undoEdit(analyzeId: string): Promise<{ canUndo: boolean }> {
+  const form = new FormData();
+  form.append("analyze_id", analyzeId);
+  const r = await fetch(apiUrl("/undo"), { method: "POST", body: form });
+  if (!r.ok) {
+    const b = await r.json().catch(() => ({}));
+    throw new ApiError(b?.error?.message ?? `could not undo (${r.status})`);
+  }
+  const d = await r.json().catch(() => ({}));
+  return { canUndo: Boolean(d?.can_undo) };
 }
 
 function appendParams(form: FormData, params: RenderParams): void {
@@ -170,6 +188,7 @@ function appendParams(form: FormData, params: RenderParams): void {
   form.append("distortion", String(params.distortion));
   form.append("grain", String(params.grain));
   form.append("grain_size", String(params.grain_size));
+  form.append("grain_blend", String(params.grain_blend));
 }
 
 /** Render from an analysis + an (edited) depth-map PNG blob. */

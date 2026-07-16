@@ -48,6 +48,7 @@ class BlurParams:
     distortion: float = 0.0    # barrel lens distortion (paired with CA in the UI)
     grain: float = 0.0         # modeled film grain amount (0..1, quadratic ramp)
     grain_size: float = 0.4    # grain cell character: 0 very fine → 1 coarse
+    grain_blend: float = 0.0   # confine grain to defocus: 0 = everywhere → 1 = blurred parts only
     grain_seed: float = 0.37   # per-image seed so grain is static across slider edits
 
 

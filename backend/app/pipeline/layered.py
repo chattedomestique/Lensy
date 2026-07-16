@@ -389,11 +389,23 @@ def _finish(out_lin: np.ndarray, p: BlurParams) -> np.ndarray:
     return (np.clip(linear_to_srgb(out_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
-def _output_optics(out_u8: np.ndarray, p: BlurParams) -> np.ndarray:
+def _defocus_mask(bg_radius: np.ndarray, a_sub: np.ndarray) -> np.ndarray:
+    """0 where the frame is sharp (the subject, and in-focus background) → 1 where it is clearly out
+    of focus. Drives the optional 'grain only in the blurred parts' blend. The most-blurred half of
+    the background saturates to 1; the subject (matte) is forced to 0 so it never grains in that mode."""
+    ref = max(0.5 * float(bg_radius.max()), 2.0)
+    blur_norm = np.clip(bg_radius / ref, 0.0, 1.0)
+    return np.clip((1.0 - np.clip(a_sub, 0.0, 1.0)) * blur_norm, 0.0, 1.0).astype(np.float32)
+
+
+def _output_optics(out_u8: np.ndarray, p: BlurParams, defocus: np.ndarray | None = None) -> np.ndarray:
     """Geometric lens optics + film grain — the very last passes, applied at the FINAL export
     resolution. Grain is modeled per output pixel (crystalline at any size), and CA/distortion are
     radial remaps; running them here keeps grain crisp and the remaps precise even when a working-res
-    render was upscaled for a full-res export (otherwise the grain gets stretched and blurred)."""
+    render was upscaled for a full-res export (otherwise the grain gets stretched and blurred).
+
+    `defocus` is the working-res out-of-focus mask; apply_grain resizes it and uses it (with
+    p.grain_blend) to optionally confine grain to the blurred regions."""
     if p.ca > 0:  # lateral chromatic aberration — per-channel magnification
         out_u8 = _apply_ca(out_u8, p.ca)
     if p.distortion > 0:  # barrel lens distortion
@@ -401,7 +413,7 @@ def _output_optics(out_u8: np.ndarray, p: BlurParams) -> np.ndarray:
     if p.grain > 0:  # modeled film grain
         from .grain import apply_grain
 
-        out_u8 = apply_grain(out_u8, p.grain, p.grain_size, p.grain_seed)
+        out_u8 = apply_grain(out_u8, p.grain, p.grain_size, p.grain_seed, p.grain_blend, defocus)
     return out_u8
 
 
@@ -464,7 +476,8 @@ def _composite_full_res(
 
     # 4) premultiplied subject OVER background (both optics + grain applied at this full res)
     out_lin = fg_full_lin * a_full + bg_full * (1.0 - a_full)
-    return _output_optics(_finish(out_lin, p), p)
+    defocus = _defocus_mask(bg_radius, alpha_work)  # for the optional grain-in-defocus blend
+    return _output_optics(_finish(out_lin, p), p, defocus)
 
 
 def render_layered_dof(
@@ -510,7 +523,9 @@ def render_layered_dof(
         base = orig_srgb if full_wh is not None else work_srgb
         if not _has_character(p):
             return base.copy()  # pristine: untouched source pixels, no sRGB round-trip loss
-        return _output_optics(_finish(srgb_to_linear(base.astype(np.float32) / 255.0), p), p)
+        # nothing is out of focus → a zero defocus mask, so "grain in blurred parts only" yields none
+        no_defocus = np.zeros((h, w), np.float32)
+        return _output_optics(_finish(srgb_to_linear(base.astype(np.float32) / 255.0), p), p, no_defocus)
     # (no source image handed in — fall through: at zero CoC the normal composite below reconstructs
     #  the sharp subject over the clean background, which is the correct sharp image anyway.)
     # Near-foreground occluders (a pole/railing right by the lens): the unified back-to-front sheet
@@ -611,5 +626,5 @@ def render_layered_dof(
     if full_wh is not None and (full_wh[0] != w or full_wh[1] != h):
         out = cv2.resize(out, full_wh, interpolation=cv2.INTER_CUBIC)
     # ...then apply grain + geometric optics at that FINAL resolution so grain stays crisp (not a
-    # stretched upscale) and the remaps are precise.
-    return _output_optics(out, p)
+    # stretched upscale) and the remaps are precise. Grain can confine itself to the defocus.
+    return _output_optics(out, p, _defocus_mask(bg_radius, a_sub))

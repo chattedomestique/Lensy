@@ -16,11 +16,16 @@ import {
   renderFromAnalyze,
   segment,
   selectSubject,
+  undoEdit,
   type RenderHandle,
 } from "./api";
 import { DepthEditor } from "./depth";
 import { EraseSelection } from "./erase";
 import { setupServerPanel } from "./server";
+
+// injected by Vite `define` (see vite.config.ts) — package version + short git SHA of the build
+declare const __APP_VERSION__: string;
+declare const __BUILD_ID__: string;
 
 registerSW({ immediate: true });
 
@@ -40,21 +45,26 @@ const subrow = $("subrow");
 const tabbar = $("tabbar");
 const saveBtn = $("save") as HTMLButtonElement;
 const compareBtn = $("compare") as HTMLButtonElement;
+const newBtn = $("new") as HTMLButtonElement;
+const undoBtn = $("undo") as HTMLButtonElement;
+const appver = $("appver");
 const progress = $("progress");
 const progressLabel = $("progress-label");
+
+appver.textContent = `v${__APP_VERSION__}·${__BUILD_ID__}`;
 
 // ---- editable state (all values live in 0..100 UI units) ----
 type Key =
   | "amount" | "position" | "contrast" | "falloff"       // depth (client-side)
   | "k" | "highlight" | "halation" | "halationSize"       // lens (backend)
   | "ca" | "swirl" | "sweet" | "sweetSize" | "distortion"
-  | "grain" | "grainSize";
+  | "grain" | "grainSize" | "grainBlend";
 
 const DEFAULTS: Record<Key, number> = {
   amount: 50, position: 50, contrast: 0, falloff: 20,
   k: 60, highlight: 0, halation: 0, halationSize: 40,
   ca: 0, swirl: 0, sweet: 0, sweetSize: 35, distortion: 0,
-  grain: 0, grainSize: 40,
+  grain: 0, grainSize: 40, grainBlend: 0,
 };
 const state: Record<Key, number> = { ...DEFAULTS };
 let blades = 0;
@@ -117,6 +127,7 @@ const TOOLS: Tool[] = [
     params: [
       { key: "grain", label: "Grain" },
       { key: "grainSize", label: "Grain size" },
+      { key: "grainBlend", label: "Blend" },
     ],
   },
   { id: "refine", label: "Refine", params: [], refine: true },
@@ -142,6 +153,7 @@ let analyzeId: string | null = null;
 let analyzeW = 0;
 let analyzeH = 0;
 let dataVersion = 0; // bumped after an erase so depth/matte/photo re-fetch past the cache
+let canUndo = false; // a processed erase is available to undo on the server
 let inflight: RenderHandle | null = null;
 let renderTimer: number | undefined;
 let rafPending = false;
@@ -154,6 +166,12 @@ function toast(message: string): void {
   el.classList.add("show");
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => el.classList.remove("show"), 4000);
+}
+
+// undo availability (a processed erase can be reverted on the server)
+function setUndo(v: boolean): void {
+  canUndo = v;
+  undoBtn.classList.toggle("hidden", !v);
 }
 
 // ---- odometer ticker (0..100) ----
@@ -694,7 +712,8 @@ async function doErase(): Promise<void> {
   setProgress("Erasing…");
   try {
     const mask = await eraseSel.exportPng();
-    await eraseObject(analyzeId, mask, eraseTarget);
+    const { canUndo: cu } = await eraseObject(analyzeId, mask, eraseTarget);
+    setUndo(cu); // the processed erase can now be undone
     dataVersion++;
     // the scene changed — reload depth/matte and the cleaned source photo
     await editor.load(depthUrl(analyzeId, dataVersion), matteUrl(analyzeId, dataVersion));
@@ -703,10 +722,35 @@ async function doErase(): Promise<void> {
     eraseSel.init(analyzeW, analyzeH, eraseLayer); // reset selection for more removals
     setProgress("", false);
     void doRender(); // refresh the cached render behind the scenes
-    toast("Erased. Select more, or switch tools to style it.");
+    toast("Erased. Undo up top if needed, or switch tools to style it.");
   } catch (err) {
     setProgress("", false);
     toast(err instanceof ApiError ? err.message : "Erase failed.");
+  }
+}
+
+// ---- undo a processed erase (server-side) ----
+async function undoErase(): Promise<void> {
+  if (!analyzeId || !canUndo) return;
+  inflight?.cancel();
+  setProgress("Undoing…");
+  try {
+    const { canUndo: cu } = await undoEdit(analyzeId);
+    setUndo(cu);
+    dataVersion++;
+    // the scene was restored — reload depth/matte (and, if selecting, the restored source photo)
+    await editor.load(depthUrl(analyzeId, dataVersion), matteUrl(analyzeId, dataVersion));
+    editor.setSettings(depthSettings());
+    if (activeTool.erase) {
+      resultImg.src = photoUrl(analyzeId, dataVersion);
+      eraseSel.init(analyzeW, analyzeH, eraseLayer);
+    }
+    setProgress("", false);
+    void doRender();
+    toast("Undid the erase.");
+  } catch (err) {
+    setProgress("", false);
+    toast(err instanceof ApiError ? err.message : "Couldn't undo.");
   }
 }
 
@@ -738,6 +782,7 @@ function renderParams(): RenderParams {
     distortion: backendVal("distortion"),
     grain: state.grain / 100,
     grain_size: state.grainSize / 100,
+    grain_blend: state.grainBlend / 100,
   };
 }
 
@@ -791,15 +836,18 @@ async function acceptFile(file: File): Promise<void> {
     toast("That doesn't look like an image.");
     return;
   }
+  inflight?.cancel(); // a render from the previous photo must not paint over the new one
   currentFile = file;
   if (originalUrl) URL.revokeObjectURL(originalUrl);
   originalUrl = URL.createObjectURL(file);
   analyzeId = null;
   dataVersion = 0;
+  setUndo(false); // fresh image → nothing to undo
   resetZoom();
   resultImg.src = originalUrl;
   resultImg.classList.remove("hidden");
   dropzone.classList.add("hidden");
+  newBtn.classList.remove("hidden"); // let the user load another photo without restarting
   depthView.classList.add("hidden");
   eraseLayer.classList.add("hidden");
   dragSurface.classList.add("hidden");
@@ -883,6 +931,7 @@ dropzone.addEventListener("keydown", (e) => {
 fileInput.addEventListener("change", () => {
   const f = fileInput.files?.[0];
   if (f) void acceptFile(f);
+  fileInput.value = ""; // allow re-picking the same file (change won't fire otherwise)
 });
 ["dragenter", "dragover"].forEach((ev) =>
   dropzone.addEventListener(ev, (e) => {
@@ -901,6 +950,10 @@ dropzone.addEventListener("drop", (e) => {
   if (f) void acceptFile(f);
 });
 saveBtn.addEventListener("click", save);
+// New: load another photo without restarting the app (the file-input change handler resets state)
+newBtn.addEventListener("click", () => fileInput.click());
+// Undo: revert the most recent processed erase on the server
+undoBtn.addEventListener("click", () => void undoErase());
 
 // brush size / hardness
 const brushSizeInput = $("brush-size") as HTMLInputElement;

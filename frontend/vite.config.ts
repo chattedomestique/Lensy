@@ -1,3 +1,5 @@
+import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
@@ -10,8 +12,25 @@ const BACKEND = process.env.LENSY_BACKEND ?? `http://localhost:${process.env.LEN
 // sets LENSY_BASE=/Lensy/. Local dev and root-domain hosts use "/".
 const BASE = process.env.LENSY_BASE ?? "/";
 
+// Build stamp shown in the top bar so you can tell which build is live. Version from package.json
+// + the short git SHA (falls back to the date if git isn't available at build time).
+const PKG = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf-8"));
+let GIT_SHA = "";
+try {
+  GIT_SHA = execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] })
+    .toString()
+    .trim();
+} catch {
+  /* not a git checkout / git absent — fall back below */
+}
+const BUILD_ID = GIT_SHA || new Date().toISOString().slice(0, 10);
+
 export default defineConfig({
   base: BASE,
+  define: {
+    __APP_VERSION__: JSON.stringify(PKG.version),
+    __BUILD_ID__: JSON.stringify(BUILD_ID),
+  },
   server: {
     port: 5173,
     proxy: {
@@ -20,6 +39,7 @@ export default defineConfig({
       "/segment": { target: BACKEND, changeOrigin: true },
       "/subject": { target: BACKEND, changeOrigin: true },
       "/erase": { target: BACKEND, changeOrigin: true },
+      "/undo": { target: BACKEND, changeOrigin: true },
       "/healthz": { target: BACKEND, changeOrigin: true },
     },
   },
