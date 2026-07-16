@@ -17,6 +17,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -26,7 +27,9 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from PIL import Image, ImageOps
 
-from .pipeline import RenderParams, analyze, erase, precompose, render_from, run_pipeline
+from .pipeline import (
+    RenderParams, analyze, downscale_to_working, erase, precompose, render_from, run_pipeline,
+)
 from .pipeline.segment import restrict_matte, segment_at
 
 log = logging.getLogger("lensy.api")
@@ -36,6 +39,10 @@ _JOBS: dict[str, "Job"] = {}
 _ANALYSES: dict[str, "Analysis"] = {}
 _MAX_JOBS = 16
 _MAX_ANALYSES = 12
+# The full-res original kept for native-resolution export is bounded on the long edge so a single
+# huge upload (a 100 MB JPEG can decode to >1 GB) can't blow up memory (§1: downscale huge inputs).
+# 6144 px keeps typical phone/mirrorless shots (12–24 MP) native; override with LENSY_MAX_EXPORT_EDGE.
+_MAX_EXPORT_EDGE = int(os.environ.get("LENSY_MAX_EXPORT_EDGE", "6144"))
 
 
 @dataclass
@@ -51,6 +58,7 @@ class Job:
 class Analysis:
     id: str
     work: np.ndarray       # working-res RGB uint8
+    orig: np.ndarray | None  # full-res source RGB uint8 (pre-downscale) → full-quality export (§6)
     alpha: np.ndarray      # matte [0,1]
     depth: np.ndarray      # depth [0,1], near = 1
     fg: np.ndarray | None = None        # decontaminated F — computed lazily on the first render
@@ -79,10 +87,14 @@ def _decode_image(raw: bytes) -> tuple[np.ndarray, bytes | None]:
         raise ValueError(f"could not decode image: {e}") from e
 
 
-def _encode_jpeg(rgb_u8: np.ndarray, quality: int = 92, icc: bytes | None = None) -> bytes:
+def _encode_jpeg(rgb_u8: np.ndarray, quality: int = 95, icc: bytes | None = None) -> bytes:
+    """Encode near-lossless: quality 95 with 4:4:4 chroma (subsampling=0) so fine edge/hair detail
+    survives, and carry the source ICC profile so wide-gamut colour round-trips (§7 boundary)."""
     buf = io.BytesIO()
     kw = {"icc_profile": icc} if icc else {}
-    Image.fromarray(rgb_u8).save(buf, format="JPEG", quality=quality, subsampling=0, **kw)
+    Image.fromarray(rgb_u8).save(
+        buf, format="JPEG", quality=quality, subsampling=0, optimize=True, **kw
+    )
     return buf.getvalue()
 
 
@@ -143,8 +155,12 @@ async def analyze_photo(
 
     _evict(_ANALYSES, _MAX_ANALYSES)
     aid = uuid.uuid4().hex
+    # keep the (bounded) full-res original so the final composite (and export) runs at native
+    # resolution; None when the photo is already within the working-res budget (nothing to gain).
+    orig = downscale_to_working(rgb, _MAX_EXPORT_EDGE)
+    orig = orig if orig.shape[:2] != work.shape[:2] else None
     _ANALYSES[aid] = Analysis(
-        id=aid, work=work, alpha=alpha, depth=depth, icc=icc, matte_full=alpha.copy()
+        id=aid, work=work, orig=orig, alpha=alpha, depth=depth, icc=icc, matte_full=alpha.copy()
     )
     h, w = work.shape[:2]
     return JSONResponse({"analyze_id": aid, "width": w, "height": h})
@@ -303,6 +319,7 @@ async def erase_object(
     a.alpha = restrict_matte(alpha, a.subject_sel) if a.subject_sel is not None else alpha
     a.fg = None  # invalidate the precompose cache — the scene changed
     a.clean_bg = None
+    a.orig = None  # the full-res original no longer matches the erased working image → render at work res
     return JSONResponse({"ok": True, "width": w, "height": h})
 
 
@@ -422,7 +439,9 @@ async def start_render(
         def do_render(progress):
             if a.fg is None:  # lazy precompose on the first render, cached for later edits
                 a.fg, a.clean_bg = precompose(a.work, a.alpha, bundle)
-            return render_from(a.work, a.alpha, a.fg, a.clean_bg, depth_map, params, progress)
+            return render_from(
+                a.work, a.alpha, a.fg, a.clean_bg, depth_map, params, progress, orig=a.orig
+            )
 
         return _spawn_render(request, do_render, icc=a.icc)
 

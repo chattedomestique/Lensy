@@ -46,3 +46,50 @@ def test_disp_focus_changes_output():
     a = run_pipeline(photo, RenderParams(k=80, disp_focus=0.2, autofocus=False), bundle)
     b = run_pipeline(photo, RenderParams(k=80, disp_focus=0.9, autofocus=False), bundle)
     assert not np.array_equal(a, b)
+
+
+def test_full_resolution_output():
+    """A photo larger than the working resolution must round-trip at its NATIVE size — the DoF
+    runs at working res but the final composite (and export) is done full-res (§6)."""
+    photo = _synthetic_photo(1950, 2600)  # long edge 2600 > working_res 2048
+    bundle = ModelBundle()
+    out = run_pipeline(photo, RenderParams(k=70, working_res=2048), bundle)
+    assert out.shape == photo.shape  # native resolution preserved, not downscaled to 2048
+    assert out.dtype == np.uint8
+
+
+def test_blur_off_is_pristine_full_res():
+    """K=0 turns the lens blur fully OFF: with no character effects the output is the untouched
+    photo at native resolution (full quality retained — not even an sRGB round-trip)."""
+    photo = _synthetic_photo(1500, 2200)
+    bundle = ModelBundle()
+    # highlight_boost defaults to 0.18; the app sends 0 for "no effects", so set it explicitly
+    params = RenderParams(k=0, highlight_boost=0.0, working_res=2048)
+    out = run_pipeline(photo, params, bundle)
+    assert out.shape == photo.shape
+    assert np.array_equal(out, photo)  # byte-identical to the source
+
+
+def test_blur_off_keeps_depth_effects():
+    """With blur OFF, the non-DoF character effects still apply (depth stays available for them)."""
+    photo = _synthetic_photo(1500, 2200)
+    bundle = ModelBundle()
+    plain = run_pipeline(photo, RenderParams(k=0, highlight_boost=0.0, working_res=2048), bundle)
+    grainy = run_pipeline(
+        photo, RenderParams(k=0, highlight_boost=0.0, grain=0.8, working_res=2048), bundle
+    )
+    assert grainy.shape == photo.shape
+    assert not np.array_equal(grainy, plain)  # grain applied on the sharp full-res frame
+
+
+def test_max_blur_recalibrated_to_quarter():
+    """UI K=100 now reaches a CoC ceiling of 2.75% of the diagonal — a quarter of the old 11%."""
+    from app.pipeline.blur import BlurParams, focal_radius
+
+    sig = np.linspace(0.0, 1.0, 256 * 256, dtype=np.float32).reshape(256, 256)
+    diag = float(np.hypot(256, 256))
+    r100 = focal_radius(sig, 0.5, False, BlurParams(k=100))
+    assert r100.max() <= 0.0275 * diag + 1e-3          # ceiling is the new (quartered) scale
+    assert abs(0.0275 * diag - 0.25 * (0.11 * diag)) < 0.5  # ceiling == 25% of the old ceiling
+    # K=0 is exactly zero everywhere — no residual blur floor
+    assert float(focal_radius(sig, 0.5, False, BlurParams(k=0)).max()) == 0.0

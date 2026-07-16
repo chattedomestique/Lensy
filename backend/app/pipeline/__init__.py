@@ -138,9 +138,13 @@ def render_from(
     depth_norm: np.ndarray,      # [0,1], near = 1 — the (edited) depth map
     params: RenderParams,
     progress: Progress | None = None,
+    orig: np.ndarray | None = None,   # full-res source photo → composite the output at full res (§6)
 ) -> np.ndarray:
     """Fast render from the cached precompose + a (hand-edited) depth map: just the layered
-    occlusion-aware DoF and the lens character. ~2-3s — no matte/depth/decontaminate/inpaint."""
+    occlusion-aware DoF and the lens character. ~2-3s — no matte/depth/decontaminate/inpaint.
+
+    `orig` (the full-resolution source) is optional: when given, the final composite is done at the
+    original resolution so export keeps full quality; without it the render stays at working res."""
 
     def emit(key: str, label: str, frac: float) -> None:
         if progress:
@@ -165,7 +169,10 @@ def render_from(
 
     emit(*_STAGES[5], 5 / n)
     emit(*_STAGES[6], 6 / n)
-    out = _layered.render_layered_dof(fg, alpha, clean_bg, fg_signal, bg_signal, focus, metric, blur_p)
+    out = _layered.render_layered_dof(
+        fg, alpha, clean_bg, fg_signal, bg_signal, focus, metric, blur_p,
+        orig_srgb=orig, work_srgb=work,
+    )
 
     emit("done", "Done", 1.0)
     log.info("render_from done in %.2fs (work res %s)", time.time() - t0, work.shape[:2])
@@ -178,10 +185,11 @@ def run_pipeline(
     bundle: ModelBundle,
     progress: Progress | None = None,
 ) -> np.ndarray:
-    """One-shot: analyze → precompose → render (automatic depth). Return: uint8 RGB."""
+    """One-shot: analyze → precompose → render (automatic depth). Return: uint8 RGB at the input
+    resolution — the final composite is done at full res so export keeps full quality (§6)."""
     work, alpha, depth_norm = analyze(rgb_u8, params, bundle)
     fg, clean_bg = precompose(work, alpha, bundle)
-    return render_from(work, alpha, fg, clean_bg, depth_norm, params, progress)
+    return render_from(work, alpha, fg, clean_bg, depth_norm, params, progress, orig=rgb_u8)
 
 
 __all__ = [

@@ -370,6 +370,96 @@ def _inpaint_behind(bg_u8: np.ndarray, near_a: np.ndarray) -> np.ndarray:
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def _has_character(p: BlurParams) -> bool:
+    """Any non-DoF character effect active? (bloom / halation / chromatic aberration / distortion /
+    grain). When none are, the blur-off path can return the source pixels untouched — no sRGB
+    round-trip, so 'blur off' is byte-for-byte the original photo."""
+    return p.highlight_boost > 0 or p.halation > 0 or p.ca > 0 or p.distortion > 0 or p.grain > 0
+
+
+def _finish(out_lin: np.ndarray, p: BlurParams) -> np.ndarray:
+    """Shared tail: the non-DoF character effects on a composited linear-light frame → uint8 sRGB.
+    Glows run in linear light (before tonemap) so the spill stays bright; the geometric optics
+    (chromatic aberration, distortion) and film grain are last, on the encoded frame."""
+    if p.highlight_boost > 0:  # neutral bloom across the frame
+        out_lin = _apply_bloom(out_lin, p.highlight_boost)
+    if p.halation > 0:  # warm red-orange glow out of the highlights only
+        out_lin = _apply_halation(out_lin, p.halation, p.halation_size)
+    out_lin = tonemap_highlights(out_lin)
+    out = (np.clip(linear_to_srgb(out_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    if p.ca > 0:  # lateral chromatic aberration — per-channel magnification
+        out = _apply_ca(out, p.ca)
+    if p.distortion > 0:  # barrel lens distortion
+        out = _apply_distortion(out, p.distortion)
+    if p.grain > 0:  # modeled film grain — the very last pass, on the final frame
+        from .grain import apply_grain
+
+        out = apply_grain(out, p.grain, p.grain_size, p.grain_seed)
+    return out
+
+
+def _composite_full_res(
+    orig_u8: np.ndarray,          # full-resolution source photo (sRGB uint8)
+    work_u8: np.ndarray | None,   # working-res source photo (for the decontamination correction)
+    fg_srgb_work: np.ndarray,     # decontaminated foreground F at working res
+    alpha_work: np.ndarray,       # soft matte at working res (already edge-snapped by refine)
+    bg_rendered_lin: np.ndarray,  # working-res blurred background, linear light, un-premultiplied
+    bg_radius: np.ndarray,        # working-res per-pixel CoC radius (post dilate + island fill)
+    p: BlurParams,
+) -> np.ndarray:
+    """Final composite at the ORIGINAL resolution (§6: "composite the matte back at full res for
+    output"). The heavy DoF ran at working res; here the sharp subject is composited at full res
+    over the blurred background upsampled — so the subject keeps native detail, and in-focus
+    background regions are restored from the full-res original rather than softened by the upscale.
+    Premultiplied, linear light — the §7.2 ordering (blur clean bg → composite sharp fg) is kept."""
+    H, W = orig_u8.shape[:2]
+    h, w = alpha_work.shape[:2]
+    scale = max(H / float(h), W / float(w))
+
+    # 1) full-res subject colour = full-res original + the low-frequency edge decontamination
+    #    correction (F − observed, ~0 except in the edge band), so the subject keeps full detail
+    #    AND the anti-halo edge fix from decontaminate().
+    if work_u8 is not None:
+        corr = fg_srgb_work - work_u8.astype(np.float32) / 255.0
+        corr = cv2.resize(corr, (W, H), interpolation=cv2.INTER_LINEAR)
+        fg_full = np.clip(orig_u8.astype(np.float32) / 255.0 + corr, 0.0, 1.0)
+    else:
+        fg_full = orig_u8.astype(np.float32) / 255.0
+    fg_full_lin = srgb_to_linear(fg_full)
+
+    # 2) full-res matte: upscale the (already edge-snapped) working matte, then match the working
+    #    path's sharp-subject edge treatment — pull in ~1px-equiv + feather — at full-res scale, so
+    #    the blurred background covers the contaminated edge pixels (no light outline rim).
+    a_full = cv2.resize(np.clip(alpha_work, 0.0, 1.0), (W, H), interpolation=cv2.INTER_LINEAR)
+    er = max(3, 2 * int(round(scale)) + 1)  # erode ~scale px → matches the working path's 1px pull-in
+    a_full = cv2.erode(a_full, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (er, er)))
+    a_full = cv2.GaussianBlur(a_full, (0, 0), sigmaX=max(1.0, scale))[..., None]
+
+    # 3) full-res background: upsample the blurred plate; where it is IN FOCUS (CoC≈0) blend back
+    #    the sharp full-res original so focused background isn't softened by the upscale. Subject
+    #    pixels there carry a_full≈1 and are overwritten in step 4, so no subject leaks in.
+    bg_full = cv2.resize(bg_rendered_lin, (W, H), interpolation=cv2.INTER_CUBIC)
+    sharp = cv2.GaussianBlur((bg_radius < 0.75).astype(np.float32), (0, 0), sigmaX=1.0)
+    sharp_full = cv2.resize(sharp, (W, H), interpolation=cv2.INTER_LINEAR)[..., None]
+    # NEVER sharp-restore from the original inside the subject's silhouette band: there the original
+    # still holds the contaminated edge C = αF+(1−α)B, so pulling it into the background would spill a
+    # subject-coloured rim (the §7.1 halo). Keep the clean, subject-removed blurred plate there — this
+    # matches the working-res composite, which only ever composites over the inpainted plate.
+    subj = cv2.resize(
+        (np.clip(alpha_work, 0.0, 1.0) > 0.02).astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR
+    )
+    grow = max(3, (int(round(3.0 * scale)) | 1))
+    subj = cv2.dilate(subj, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
+    subj = cv2.GaussianBlur(subj, (0, 0), sigmaX=max(1.5, scale))[..., None]
+    sharp_full = sharp_full * (1.0 - subj)
+    orig_lin = srgb_to_linear(orig_u8.astype(np.float32) / 255.0)
+    bg_full = bg_full * (1.0 - sharp_full) + orig_lin * sharp_full
+
+    # 4) premultiplied subject OVER background
+    out_lin = fg_full_lin * a_full + bg_full * (1.0 - a_full)
+    return _finish(out_lin, p)
+
+
 def render_layered_dof(
     fg_srgb: np.ndarray,
     alpha: np.ndarray,
@@ -379,10 +469,43 @@ def render_layered_dof(
     focus: float,
     metric: bool,
     p: BlurParams,
+    orig_srgb: np.ndarray | None = None,   # full-res source photo → composite the output at full res
+    work_srgb: np.ndarray | None = None,   # working-res source photo (blur-off base + decontam ref)
 ) -> np.ndarray:
-    """Full occlusion-aware render → final uint8 sRGB image."""
+    """Full occlusion-aware render → final uint8 sRGB image.
+
+    When `orig_srgb` is supplied and larger than the working image, the final composite is done at
+    the original resolution so export keeps full quality (§6). If the blur is fully off (K≈0, no
+    swirl/Lensbaby), the sharp subject over the sharp background is just the original photo, so it
+    is returned pristine at full res with only the non-DoF character effects applied."""
     h, w = alpha.shape[:2]
     a_sub = np.clip(alpha, 0.0, 1.0).astype(np.float32)
+    # full-res output target (W, H) when the caller passes a larger original; None → work res == out
+    full_wh = None
+    if orig_srgb is not None and orig_srgb.shape[:2] != (h, w):
+        full_wh = (int(orig_srgb.shape[1]), int(orig_srgb.shape[0]))
+
+    # --- lens blur fully OFF (K≈0, no swirl/Lensbaby) -------------------------------------------
+    # The circle of confusion is zero everywhere, so the depth-of-field composite reduces to the
+    # untouched photo. Return it pristine (at full res when we have it) with only the non-DoF
+    # character effects (bloom / halation / chroma / grain). The depth signal is untouched, so the
+    # depth-driven tools still work — this is "blur off, depth kept".
+    bg_radius = focal_radius(bg_signal, focus, metric, p)
+    subject_sharp = not p.subject_dof
+    fg_radius = None if subject_sharp else focal_radius(fg_signal, focus, metric, p)
+    blur_off = (
+        float(bg_radius.max()) < 0.5
+        and (fg_radius is None or float(fg_radius.max()) < 0.5)
+        and p.swirl <= 0
+        and p.sweet <= 0
+    )
+    if blur_off and (full_wh is not None or work_srgb is not None):
+        base = orig_srgb if full_wh is not None else work_srgb
+        if not _has_character(p):
+            return base.copy()  # pristine: untouched source pixels, no sRGB round-trip loss
+        return _finish(srgb_to_linear(base.astype(np.float32) / 255.0), p)
+    # (no source image handed in — fall through: at zero CoC the normal composite below reconstructs
+    #  the sharp subject over the clean background, which is the correct sharp image anyway.)
     # Near-foreground occluders (a pole/railing right by the lens): the unified back-to-front sheet
     # below ALREADY renders these occlusion-correctly — the near depth-slice scatters OVER the far
     # slices, so a near object's blurred edge softly reveals the background behind it. Pulling the
@@ -402,7 +525,7 @@ def render_layered_dof(
     # clean background; the occluders themselves are rendered as a separate spreading layer below.
     far_bg_u8 = _inpaint_behind(clean_bg_u8, near_a) if has_near else clean_bg_u8
     bg_lin = srgb_to_linear(far_bg_u8.astype(np.float32) / 255.0)
-    bg_radius = _dilate_coc(focal_radius(bg_signal, focus, metric, p))  # thin features inherit neighbour blur
+    bg_radius = _dilate_coc(bg_radius)  # thin features inherit neighbour blur (bg_radius from above)
     bg_radius = _fill_sharp_islands(bg_radius, a_sub)  # kill sharp background patches floating in blur
     bg_coord = _layer_coord(bg_signal, metric)
     excess = np.clip(bg_lin - _HI_THRESH, 0.0, None) if p.highlight_boost > 0 else None
@@ -415,6 +538,16 @@ def render_layered_dof(
         # into visible bands under the swirl.
         bg_rendered = cv2.GaussianBlur(bg_rendered, (0, 0), sigmaX=1.4)
         bg_rendered = _apply_swirl(bg_rendered, p.swirl)
+
+    # --- full-res composite (common case: sharp subject, no Lensbaby, no near-occluder layer) ---
+    # Do the subject-over-background composite at the ORIGINAL resolution so export keeps full
+    # quality (§6). The blurred background is upsampled (it's low-frequency — lossless), the subject
+    # is composited from the full-res original. Other cases fall through to the working-res composite
+    # below and are upscaled at the end, so the output is always at least full resolution.
+    # (swirl/sweet modify the background globally — including in-focus regions the full-res path
+    #  restores from the sharp original — so they take the working-res path below and are upscaled.)
+    if full_wh is not None and subject_sharp and not has_near and p.sweet <= 0 and p.swirl <= 0:
+        return _composite_full_res(orig_srgb, work_srgb, fg_srgb, alpha, bg_rendered, bg_radius, p)
 
     # --- foreground sheet (subject) ---
     fg_lin = srgb_to_linear(np.clip(fg_srgb, 0.0, 1.0))
@@ -444,7 +577,9 @@ def render_layered_dof(
         else:
             cx, cy = w / 2.0, h / 2.0
         amt = _sweet_amount(h, w, p, cx, cy)
-        max_sig = max(1.0, (p.k / 100.0) * float(np.hypot(h, w)) * 0.05)
+        # quartered alongside the DoF recalibration (0.05 → 0.0125) so the Lensbaby smear keeps its
+        # original balance vs the depth-of-field ceiling instead of dwarfing it (§3 goal).
+        max_sig = max(1.0, (p.k / 100.0) * float(np.hypot(h, w)) * 0.0125)
         fgc = _var_radial_blur(fgc, amt, max_sig)
         fga = _var_radial_blur(fga[..., 0], amt, max_sig)[..., None]
         bg_rendered = _var_radial_blur(bg_rendered, amt, max_sig)
@@ -462,20 +597,10 @@ def render_layered_dof(
         nc, na, _ = render_sheet(near_lin, near_a, near_coord, near_radius, p, None)
         out_lin = nc + out_lin * (1.0 - np.clip(na, 0.0, 1.0))
 
-    # glows in linear light, before tonemap, so the spill stays bright
-    if p.highlight_boost > 0:  # neutral bloom across the frame
-        out_lin = _apply_bloom(out_lin, p.highlight_boost)
-    if p.halation > 0:  # warm red-orange glow out of the highlights only
-        out_lin = _apply_halation(out_lin, p.halation, p.halation_size)
-    out_lin = tonemap_highlights(out_lin)
-    out = (np.clip(linear_to_srgb(out_lin), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-    # geometric lens optics, last
-    if p.ca > 0:  # lateral chromatic aberration — per-channel magnification
-        out = _apply_ca(out, p.ca)
-    if p.distortion > 0:  # barrel lens distortion
-        out = _apply_distortion(out, p.distortion)
-    if p.grain > 0:  # modeled film grain — the very last pass, on the final frame
-        from .grain import apply_grain
-
-        out = apply_grain(out, p.grain, p.grain_size, p.grain_seed)
+    # non-DoF character effects (bloom / halation / chroma / distortion / grain), then encode
+    out = _finish(out_lin, p)
+    # non-simple cases (Lensbaby / subject DoF / near-occluder layer) render at working res; upscale
+    # to the original resolution so the exported image is still full-size.
+    if full_wh is not None and (full_wh[0] != w or full_wh[1] != h):
+        out = cv2.resize(out, full_wh, interpolation=cv2.INTER_CUBIC)
     return out

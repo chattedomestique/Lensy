@@ -28,7 +28,7 @@ from .color import linear_to_srgb, srgb_to_linear, tonemap_highlights
 
 @dataclass
 class BlurParams:
-    k: float = 60.0            # blur strength slider 0..100 → max CoC radius
+    k: float = 60.0            # blur strength slider 0..100 → max CoC radius (0 = blur fully off)
     disp_focus: float = 0.7    # focal plane in disparity space [0,1] (1 = nearest)
     blades: int = 0            # 0 => circular aperture; >=3 => N-gon bokeh
     rotation: float = 0.0      # aperture rotation, radians
@@ -109,7 +109,12 @@ def _apply_cat_eye(kernel: np.ndarray, fx: float, fy: float, strength: float) ->
 # ---- depth → circle-of-confusion, and the shared scatter core -----------------------
 
 _HI_THRESH = 0.82  # linear luminance above which highlights bloom
-_DIOPTER_GAIN = 0.16  # px-per-diopter scaling at K=100 (× diagonal); tunes how fast blur grows
+# CoC scale at the slider maximum (K=100), as a fraction of the image diagonal. Recalibrated to a
+# quarter of the old value: UI K=100 now equals what the old scale reached at K≈25. The old
+# maximum (0.11·diag ≈ 270 px on a 2K frame) was a nonsensical, unrecognizable smear; ~2.75%
+# of the diagonal is a strong-but-believable portrait maximum.
+_MAX_COC_FRAC = 0.0275
+_DIOPTER_GAIN = 0.04  # px-per-diopter scaling at K=100 (× diagonal); also quartered to match
 
 
 def focal_radius(signal: np.ndarray, focus: float, metric: bool, p: BlurParams) -> np.ndarray:
@@ -122,17 +127,24 @@ def focal_radius(signal: np.ndarray, focus: float, metric: bool, p: BlurParams) 
     your feet ≠ the door 15 ft back). `focus_range` is an in-focus dead zone, in diopters.
 
     non-metric (Depth Anything, relative): fall back to normalized-disparity distance — no true
-    metres, so the falloff is only approximate."""
+    metres, so the falloff is only approximate.
+
+    K=0 turns the lens blur fully OFF: the field is exactly zero everywhere (no residual floor),
+    so the renderer returns the sharp image while the depth signal stays available for other
+    effects."""
     h, w = signal.shape[:2]
     diag = float(np.hypot(h, w))
-    max_radius = max(1.0, (p.k / 100.0) * diag * 0.11)  # ceiling so the far field saturates softly
+    k = max(0.0, float(p.k)) / 100.0
+    max_radius = k * diag * _MAX_COC_FRAC  # ceiling so the far field saturates softly
+    if max_radius < 1e-3:  # K≈0 → blur off: no residual blur, no divide-by-tiny below
+        return np.zeros((h, w), np.float32)
 
     if metric:
         f_dpt = 1.0 / max(float(focus), 0.08)
         d_dpt = 1.0 / np.clip(signal.astype(np.float32), 0.08, None)
         diff = np.abs(d_dpt - f_dpt)  # diopters from the focal plane
         eff = np.clip(diff - float(p.focus_range), 0.0, None)
-        radius = (p.k / 100.0) * diag * _DIOPTER_GAIN * eff
+        radius = k * diag * _DIOPTER_GAIN * eff
     else:
         norm = max(float(focus), 1.0 - float(focus), 1e-3)
         diff = np.abs(signal.astype(np.float32) - float(focus))
