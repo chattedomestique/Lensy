@@ -89,6 +89,11 @@ html, body {
   letter-spacing: -0.02em;
 }
 .top-actions { display: flex; align-items: center; gap: var(--s2); }
+/* build stamp — a quiet mono caption in the corner so you can tell which build is live */
+.appver {
+  font-size: 10px; letter-spacing: 0.02em; color: var(--subtle);
+  opacity: 0.7; padding-left: 2px; white-space: nowrap; user-select: text;
+}
 .icon-btn {
   display: grid; place-items: center;
   width: 36px; height: 36px; padding: 0;

@@ -1,74 +1,102 @@
-"""Modeled film grain — a NumPy port of the GLSL noise pass (grainimplementation.md).
+"""Modeled film grain — a physically-motivated approximation of analog colour-negative grain,
+tuned toward Fujifilm's fine, tight, faintly-cool character.
 
-Key properties preserved from the spec:
-  • PIXEL-scale cells (1–2.5 px), not UV-scaled blobs — floor() cells, no interpolation, so the
-    grain keeps its sharp, crystalline character at any resolution.
-  • Luminance response: parabola peaking near lum≈0.4 (pow 0.65) — grain lives in the lower
-    midtones and vanishes in deep shadows and bright highlights (halide threshold/saturation).
-  • Two scales: fine (per-grain) + coarse (2×, ISO clustering), blended by amount² · 0.45.
-  • Per-channel independent patterns (three dye layers); blue boosted ×1.3 (Fuji's blue-sensitive
-    layer is the noisiest) → subtle cyan-yellow chromatic noise.
-  • Quadratic amplitude ramp: amount² · 0.20 in midtones — imperceptible low, strong high.
-  • Static per image: the seed comes from the analysis (not the render call), so slider edits
-    re-render with identical grain — film doesn't flicker.
+Why this reads as film and not tiled digital noise:
+  • Grain is a BAND-LIMITED Gaussian field, not per-cell value noise. Real silver-halide grain is a
+    dense random cloud whose autocorrelation is ~Gaussian with a correlation length set by the grain
+    size. We build it by band-pass filtering white noise to that scale (a difference of Gaussians)
+    and renormalizing the variance — organic, tile-free, no grid, no repeats. This is the fast
+    Gaussian approximation of Newson et al., "Realistic Film Grain Rendering" (IPOL, 2017), whose
+    exact model is a Boolean/Poisson process of tiny random grains (too slow for interactive use).
+  • Two octaves (fine + coarse) model the spread of grain sizes / high-ISO clumping.
+  • Tonal response: the Boolean model's grain-coverage variance ∝ u·(1−u), so grain peaks in the mid
+    densities and vanishes in deep shadow and blown highlight (halide threshold + saturation).
+  • Colour: colour film exposes three dye layers that grain largely TOGETHER (a shared luminance
+    grain) with a little independent per-layer speckle; the blue-sensitive (yellow) layer is the
+    noisiest. The result is mostly monochrome grain with a subtle, slightly-cool chroma — the Fuji
+    look — not rainbow confetti.
+  • Static per image: the seed comes from the analysis id, so slider edits re-render identical grain
+    (film doesn't flicker frame to frame).
+  • Applied at the FINAL export resolution (see layered._output_optics) so the grain is crisp at
+    native size rather than an upscale of a working-res pattern.
 """
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
-
-def _hash(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Port of the GLSL hash: p=fract(p·(127.1,311.7)); p+=dot(p,p.yx+19.19); fract(p.x·p.y)."""
-    px = np.modf(x * 127.1)[0]
-    py = np.modf(y * 311.7)[0]
-    d = px * (py + 19.19) + py * (px + 19.19)
-    px = px + d
-    py = py + d
-    return np.modf(px * py)[0].astype(np.float32)
+# relative chroma grain per dye layer (R, G, B). Kept small so the grain is mostly monochrome (the
+# three layers grain largely together); the blue-sensitive / yellow layer grains hardest and green
+# edges out red, giving Fuji's faintly-cool speckle rather than neutral grey or rainbow confetti.
+_CHROMA_GAIN = np.array([0.09, 0.13, 0.20], np.float32)
 
 
-def _cell_noise(px: np.ndarray, py: np.ndarray, cell: float, sx: float, sy: float) -> np.ndarray:
-    """Signed [-1,1] noise constant within floor(px/cell) cells, offset by a seed pair."""
-    cx = np.floor(px / cell) + sx
-    cy = np.floor(py / cell) + sy
-    return _hash(cx, cy) * 2.0 - 1.0
+def _grain_layer(noise: np.ndarray, sigma: float) -> np.ndarray:
+    """One octave of grain: band-pass white noise to a correlation length ~sigma via a difference
+    of Gaussians (removes both the per-pixel fizz and the slow large-scale drift → organic clumps),
+    then renormalize to unit variance. Cheap: both blurs use small sigmas."""
+    lo = cv2.GaussianBlur(noise, (0, 0), sigmaX=max(sigma, 0.35))
+    hi = cv2.GaussianBlur(noise, (0, 0), sigmaX=max(sigma * 3.0, 1.05))
+    g = lo - hi
+    return g / (float(g.std()) + 1e-6)
 
 
-def apply_grain(img_u8: np.ndarray, amount: float, size: float, seed: float) -> np.ndarray:
-    """Apply modeled film grain to the final sRGB uint8 frame. amount/size in [0,1]; seed in [0,1)."""
+def apply_grain(
+    img_u8: np.ndarray,
+    amount: float,
+    size: float,
+    seed: float,
+    blend: float = 0.0,
+    defocus: np.ndarray | None = None,
+) -> np.ndarray:
+    """Apply modeled film grain to the final sRGB uint8 frame.
+
+    amount/size/blend in [0,1]; seed in [0,1). `blend` optionally confines the grain to the
+    out-of-focus regions: 0 = grain everywhere, 1 = grain only where blurred, between = a lerp.
+    `defocus` (float [0,1], 0 = sharp/subject → 1 = fully blurred) is the mask that drives `blend`;
+    it is resized to the frame if needed."""
     if amount <= 0.001:
         return img_u8
     h, w = img_u8.shape[:2]
     col = img_u8.astype(np.float32) / 255.0
+    rng = np.random.default_rng(int(abs(float(seed)) * 1e6) % (2**32))
 
-    # luminance response — peak in the lower midtones
-    lum = col @ np.array([0.299, 0.587, 0.114], np.float32)
-    lum_curve = np.power(np.clip(4.0 * lum * (1.0 - lum), 0.0, None), 0.65)
+    # grain correlation length in output px — Fuji is fine/tight: ~0.7 px (very fine) → ~3 px (coarse)
+    r_fine = 0.7 + 2.3 * float(np.clip(size, 0.0, 1.0))
+    r_coarse = r_fine * 2.3
+    coarse_mix = 0.4 * float(np.clip(amount, 0.0, 1.0))  # ISO clumping grows with amount
 
-    # cell sizes in real output pixels; `size` is the stock's grain character (independent of amount)
-    fine = 1.0 + 2.0 * float(size)   # 1.0 (very fine) → 3.0 (coarse)
-    coarse = fine * 2.0
+    def octaves() -> np.ndarray:
+        fine = _grain_layer(rng.standard_normal((h, w), dtype=np.float32), r_fine)
+        coarse = _grain_layer(rng.standard_normal((h, w), dtype=np.float32), r_coarse)
+        return fine * (1.0 - coarse_mix) + coarse * coarse_mix
 
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-
-    # per-channel independent seed pairs (three dye layers), from the per-image seed
-    t = float(seed)
-    seeds = {
-        "r": (np.floor(t * 13.7 + 1.3), np.floor(t * 29.1 + 5.7)),
-        "g": (np.floor(t * 43.9 + 7.1), np.floor(t * 11.3 + 2.9)),
-        "b": (np.floor(t * 67.3 + 3.9), np.floor(t * 53.7 + 8.1)),
-    }
-
-    coarse_mix = amount * amount * 0.45
+    # shared luminance grain (the dominant, mostly-monochrome component) + subtle per-layer speckle
+    lum = octaves()
     grain = np.empty((h, w, 3), np.float32)
-    for i, ch in enumerate(("r", "g", "b")):
-        sx, sy = seeds[ch]
-        f = _cell_noise(xx, yy, fine, sx, sy)
-        c = _cell_noise(xx, yy, coarse, sx + 100.0, sy + 100.0)
-        grain[..., i] = f * (1.0 - coarse_mix) + c * coarse_mix
-    grain[..., 2] *= 1.3  # blue-sensitive layer grains hardest
+    for i in range(3):
+        grain[..., i] = lum + _CHROMA_GAIN[i] * octaves()
+    # renormalize each channel to unit std so `amp` below is a predictable RMS in [0,1]
+    grain -= grain.mean(axis=(0, 1), keepdims=True)
+    grain /= grain.std(axis=(0, 1), keepdims=True) + 1e-6
 
-    amplitude = (amount * amount * 0.20) * lum_curve
-    out = col + grain * amplitude[..., None]
+    # tonal response: Boolean-model coverage variance ∝ u·(1−u) → midtone-weighted, ~0 at extremes
+    lum_img = col @ np.array([0.299, 0.587, 0.114], np.float32)
+    resp = np.sqrt(np.clip(4.0 * lum_img * (1.0 - lum_img), 0.0, 1.0))
+
+    # RMS grain amplitude in [0,1] — perceptible when low, strong-but-not-blown at amount=1
+    rms = 0.015 + 0.10 * float(amount) * float(amount)
+    amp = rms * resp[..., None]
+
+    # blend: fade the grain toward the defocused regions only. 1 − blend·(1 − defocus): at blend=0
+    # the factor is 1 everywhere; at blend=1 it equals the defocus mask (sharp/subject → no grain).
+    b = float(np.clip(blend, 0.0, 1.0))
+    if b > 0.0 and defocus is not None:
+        d = defocus.astype(np.float32)
+        if d.shape[:2] != (h, w):
+            d = cv2.resize(d, (w, h), interpolation=cv2.INTER_LINEAR)
+        amp = amp * (1.0 - b * (1.0 - np.clip(d, 0.0, 1.0)))[..., None]
+
+    out = col + grain * amp
     return (np.clip(out, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)

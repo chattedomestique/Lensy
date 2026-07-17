@@ -17,6 +17,18 @@
       <header class="topbar">
         <span class="wordmark">Lensy</span>
         <div class="top-actions">
+          <button id="new" class="icon-btn hidden" title="New photo" aria-label="Load a new photo">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="14" rx="2.5" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M12 9.5v5M9.5 12h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button id="undo" class="icon-btn hidden" title="Undo erase" aria-label="Undo erase">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M9 7 4.5 11.5 9 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M4.5 11.5H15a4.5 4.5 0 0 1 0 9h-2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
           <button id="save" class="icon-btn hidden" title="Save photo" aria-label="Save photo">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path d="M12 3v12m0 0 4-4m-4 4-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -27,6 +39,7 @@
             <span id="server-dot" class="server-dot"></span>
             <span id="server-label" class="visually-hidden"></span>
           </button>
+          <span id="appver" class="appver mono" title="Build version"></span>
         </div>
       </header>
 

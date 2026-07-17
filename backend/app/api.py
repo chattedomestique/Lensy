@@ -17,6 +17,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -26,7 +27,9 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from PIL import Image, ImageOps
 
-from .pipeline import RenderParams, analyze, erase, precompose, render_from, run_pipeline
+from .pipeline import (
+    RenderParams, analyze, downscale_to_working, erase, precompose, render_from, run_pipeline,
+)
 from .pipeline.segment import restrict_matte, segment_at
 
 log = logging.getLogger("lensy.api")
@@ -36,6 +39,11 @@ _JOBS: dict[str, "Job"] = {}
 _ANALYSES: dict[str, "Analysis"] = {}
 _MAX_JOBS = 16
 _MAX_ANALYSES = 12
+_MAX_UNDO = 10  # how many processed erases can be undone per analysis
+# The full-res original kept for native-resolution export is bounded on the long edge so a single
+# huge upload (a 100 MB JPEG can decode to >1 GB) can't blow up memory (§1: downscale huge inputs).
+# 6144 px keeps typical phone/mirrorless shots (12–24 MP) native; override with LENSY_MAX_EXPORT_EDGE.
+_MAX_EXPORT_EDGE = int(os.environ.get("LENSY_MAX_EXPORT_EDGE", "6144"))
 
 
 @dataclass
@@ -51,6 +59,7 @@ class Job:
 class Analysis:
     id: str
     work: np.ndarray       # working-res RGB uint8
+    orig: np.ndarray | None  # full-res source RGB uint8 (pre-downscale) → full-quality export (§6)
     alpha: np.ndarray      # matte [0,1]
     depth: np.ndarray      # depth [0,1], near = 1
     fg: np.ndarray | None = None        # decontaminated F — computed lazily on the first render
@@ -58,6 +67,7 @@ class Analysis:
     icc: bytes | None = None            # source ICC profile (e.g. Display P3), carried to output
     matte_full: np.ndarray | None = None   # the auto (BiRefNet) matte before subject restriction
     subject_sel: np.ndarray | None = None  # union of tapped SAM2 subject masks (None = auto matte)
+    undo_stack: list = field(default_factory=list)  # pre-erase snapshots, for undoing a processed erase
     created: float = field(default_factory=time.time)
 
 
@@ -79,10 +89,14 @@ def _decode_image(raw: bytes) -> tuple[np.ndarray, bytes | None]:
         raise ValueError(f"could not decode image: {e}") from e
 
 
-def _encode_jpeg(rgb_u8: np.ndarray, quality: int = 92, icc: bytes | None = None) -> bytes:
+def _encode_jpeg(rgb_u8: np.ndarray, quality: int = 95, icc: bytes | None = None) -> bytes:
+    """Encode near-lossless: quality 95 with 4:4:4 chroma (subsampling=0) so fine edge/hair detail
+    survives, and carry the source ICC profile so wide-gamut colour round-trips (§7 boundary)."""
     buf = io.BytesIO()
     kw = {"icc_profile": icc} if icc else {}
-    Image.fromarray(rgb_u8).save(buf, format="JPEG", quality=quality, subsampling=0, **kw)
+    Image.fromarray(rgb_u8).save(
+        buf, format="JPEG", quality=quality, subsampling=0, optimize=True, **kw
+    )
     return buf.getvalue()
 
 
@@ -101,6 +115,26 @@ def _decode_gray(raw: bytes, size_wh: tuple[int, int]) -> np.ndarray:
 def _evict(store: dict, cap: int) -> None:
     while len(store) >= cap:
         store.pop(next(iter(store)), None)
+
+
+def _push_undo(a: "Analysis") -> None:
+    """Snapshot the fields an erase replaces, so the processed erase can be undone. Erase reassigns
+    (never mutates in place) these arrays, so storing references — not copies — is safe and cheap.
+    fg/clean_bg are caches and are recomputed on the next render, so they're left out of the snapshot."""
+    a.undo_stack.append(
+        {"work": a.work, "orig": a.orig, "depth": a.depth,
+         "matte_full": a.matte_full, "alpha": a.alpha, "subject_sel": a.subject_sel}
+    )
+    if len(a.undo_stack) > _MAX_UNDO:
+        a.undo_stack.pop(0)
+
+
+def _pop_undo(a: "Analysis") -> None:
+    """Restore the most recent pre-erase snapshot and drop the precompose cache (it recomputes)."""
+    snap = a.undo_stack.pop()
+    a.work, a.orig, a.depth = snap["work"], snap["orig"], snap["depth"]
+    a.matte_full, a.alpha, a.subject_sel = snap["matte_full"], snap["alpha"], snap["subject_sel"]
+    a.fg = a.clean_bg = None
 
 
 @router.get("/healthz")
@@ -143,8 +177,12 @@ async def analyze_photo(
 
     _evict(_ANALYSES, _MAX_ANALYSES)
     aid = uuid.uuid4().hex
+    # keep the (bounded) full-res original so the final composite (and export) runs at native
+    # resolution; None when the photo is already within the working-res budget (nothing to gain).
+    orig = downscale_to_working(rgb, _MAX_EXPORT_EDGE)
+    orig = orig if orig.shape[:2] != work.shape[:2] else None
     _ANALYSES[aid] = Analysis(
-        id=aid, work=work, alpha=alpha, depth=depth, icc=icc, matte_full=alpha.copy()
+        id=aid, work=work, orig=orig, alpha=alpha, depth=depth, icc=icc, matte_full=alpha.copy()
     )
     h, w = work.shape[:2]
     return JSONResponse({"analyze_id": aid, "width": w, "height": h})
@@ -298,12 +336,31 @@ async def erase_object(
     except Exception as e:  # noqa: BLE001
         log.exception("erase failed")
         return _friendly(500, "erase_failed", f"{e.__class__.__name__}: {e}")
+    _push_undo(a)  # snapshot the pre-erase scene so this processed erase can be undone
     a.work, a.depth = cleaned, depth
     a.matte_full = alpha
     a.alpha = restrict_matte(alpha, a.subject_sel) if a.subject_sel is not None else alpha
     a.fg = None  # invalidate the precompose cache — the scene changed
     a.clean_bg = None
-    return JSONResponse({"ok": True, "width": w, "height": h})
+    a.orig = None  # the full-res original no longer matches the erased working image → render at work res
+    return JSONResponse({"ok": True, "width": w, "height": h, "can_undo": True})
+
+
+@router.post("/undo")
+async def undo_erase(
+    request: Request,
+    analyze_id: str = Form(...),
+) -> JSONResponse:
+    """Undo the most recent processed erase: restore the pre-erase scene (pixels, depth, matte, and
+    the full-res original). The client then reloads depth/matte/photo and re-renders."""
+    a = _ANALYSES.get(analyze_id)
+    if a is None:
+        return _friendly(404, "unknown_analysis", "That analysis expired — re-add the photo.")
+    if not a.undo_stack:
+        return _friendly(400, "nothing_to_undo", "Nothing to undo.")
+    _pop_undo(a)
+    h, w = a.work.shape[:2]
+    return JSONResponse({"ok": True, "width": w, "height": h, "can_undo": bool(a.undo_stack)})
 
 
 # ----------------------------------- render ----------------------------------------
@@ -312,7 +369,7 @@ async def erase_object(
 def _params_from_form(
     k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
     swirl, sweet, sweet_size, halation, halation_size, ca, distortion, grain, grain_size,
-    working_res,
+    grain_blend, working_res,
 ) -> RenderParams:
     return RenderParams(
         k=float(np.clip(k, 0, 100)),
@@ -332,6 +389,7 @@ def _params_from_form(
         distortion=float(np.clip(distortion, 0, 1)),
         grain=float(np.clip(grain, 0, 1)),
         grain_size=float(np.clip(grain_size, 0, 1)),
+        grain_blend=float(np.clip(grain_blend, 0, 1)),
         working_res=int(np.clip(working_res, 512, 4096)),
     )
 
@@ -391,6 +449,7 @@ async def start_render(
     distortion: float = Form(0.0),
     grain: float = Form(0.0),
     grain_size: float = Form(0.4),
+    grain_blend: float = Form(0.0),
     working_res: int = Form(2048),
 ) -> JSONResponse:
     bundle = getattr(request.app.state, "bundle", None)
@@ -399,7 +458,7 @@ async def start_render(
     params = _params_from_form(
         k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
         swirl, sweet, sweet_size, halation, halation_size, ca, distortion, grain, grain_size,
-        working_res,
+        grain_blend, working_res,
     )
     if analyze_id:  # grain is static per image: seed from the analysis id, not per render
         params.grain_seed = (int(analyze_id[:8], 16) % 9973) / 9973.0
@@ -419,10 +478,21 @@ async def start_render(
                 except Exception as e:  # noqa: BLE001
                     return _friendly(400, "bad_depth", f"could not read edited depth: {e}")
 
+        # Snapshot the scene HERE, on the event loop, so a concurrent /undo, /erase or /subject
+        # (which reassign a.work/a.alpha/a.fg on the event loop while this render runs in a worker
+        # thread) can't feed the worker a torn mix of buffers or poison the precompose cache. The
+        # render works entirely off this immutable snapshot; the cache is only written back if the
+        # analysis still points at the same scene when the slow precompose finishes.
+        s_work, s_alpha, s_orig = a.work, a.alpha, a.orig
+        s_fg, s_clean_bg = a.fg, a.clean_bg
+
         def do_render(progress):
-            if a.fg is None:  # lazy precompose on the first render, cached for later edits
-                a.fg, a.clean_bg = precompose(a.work, a.alpha, bundle)
-            return render_from(a.work, a.alpha, a.fg, a.clean_bg, depth_map, params, progress)
+            fg, clean_bg = s_fg, s_clean_bg
+            if fg is None:  # lazy precompose on the first render, cached for later edits
+                fg, clean_bg = precompose(s_work, s_alpha, bundle)
+                if a.work is s_work and a.alpha is s_alpha:  # scene unchanged → safe to cache
+                    a.fg, a.clean_bg = fg, clean_bg
+            return render_from(s_work, s_alpha, fg, clean_bg, depth_map, params, progress, orig=s_orig)
 
         return _spawn_render(request, do_render, icc=a.icc)
 
