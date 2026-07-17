@@ -27,7 +27,7 @@ export interface RenderParams {
 export interface ProgressEvent {
   stage: string;
   label: string;
-  progress: number; // 0..1
+  progress: number | null; // 0..1, or null when the step is indeterminate
 }
 
 export interface RenderHandle {
@@ -136,25 +136,99 @@ export async function selectSubject(
   }
 }
 
-/** Erase the masked region on the source and re-derive matte + depth. Resolves when done.
- * layer: "auto" | "subject" | "background" — restrict the erase to one side of the matte.
- * Returns whether the processed erase can now be undone. */
+export type EraseEngine = "lama" | "objectclear" | "flux";
+
+/** Per-engine load state for the removal picker. */
+export async function engineStatus(): Promise<Record<string, string>> {
+  try {
+    const r = await fetch(apiUrl("/engines"));
+    if (!r.ok) return {};
+    return (await r.json())?.engines ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/** Preload a heavy removal engine so the first erase isn't a cold start. Fire-and-forget. */
+export function warmEngine(engine: EraseEngine): void {
+  const form = new FormData();
+  form.append("engine", engine);
+  void fetch(apiUrl("/warm"), { method: "POST", body: form }).catch(() => {});
+}
+
+/** Erase the masked region with the chosen engine and re-derive matte + depth. Runs as a background
+ * job (Flux can take 10–15 min): streams a real % over SSE and polls the result, robust to a dropped
+ * stream. Resolves with whether the erase can be undone and which engine actually ran (a heavy
+ * engine that can't load falls back to LaMa server-side). */
 export async function eraseObject(
   analyzeId: string,
   maskPng: Blob,
-  layer: "auto" | "subject" | "background" = "auto",
-): Promise<{ canUndo: boolean }> {
+  layer: "auto" | "subject" | "background",
+  engine: EraseEngine,
+  steps: number,
+  onProgress: (p: ProgressEvent) => void,
+): Promise<{ canUndo: boolean; engine: string }> {
   const form = new FormData();
   form.append("analyze_id", analyzeId);
   form.append("mask", maskPng, "mask.png");
   form.append("layer", layer);
-  const r = await fetch(apiUrl("/erase"), { method: "POST", body: form });
-  if (!r.ok) {
-    const b = await r.json().catch(() => ({}));
-    throw new ApiError(b?.error?.message ?? `could not erase (${r.status})`);
+  form.append("engine", engine);
+  form.append("steps", String(steps));
+  const start = await fetch(apiUrl("/erase"), { method: "POST", body: form });
+  if (!start.ok) {
+    const b = await start.json().catch(() => ({}));
+    throw new ApiError(b?.error?.message ?? `could not start erase (${start.status})`);
   }
-  const d = await r.json().catch(() => ({}));
-  return { canUndo: Boolean(d?.can_undo) };
+  const { job_id } = (await start.json()) as { job_id: string };
+
+  const source = new EventSource(apiUrl(`/erase/${job_id}/events`));
+  let serverError: string | null = null;
+  source.addEventListener("progress", (e) => {
+    try {
+      onProgress(JSON.parse((e as MessageEvent).data));
+    } catch {
+      /* ignore malformed frame */
+    }
+  });
+  source.addEventListener("error", (e) => {
+    const data = (e as MessageEvent).data;
+    if (data) {
+      try {
+        serverError = JSON.parse(data).error ?? "erase failed";
+      } catch {
+        /* transport drop — polling recovers it */
+      }
+    }
+  });
+
+  // poll the result until ready — Flux can run many minutes, so allow a long deadline.
+  const deadline = Date.now() + 35 * 60 * 1000;
+  const wait = () => new Promise((res) => setTimeout(res, 1500));
+  try {
+    for (;;) {
+      if (serverError) throw new ApiError(serverError);
+      if (Date.now() > deadline) throw new ApiError("erase timed out");
+      let r: Response;
+      try {
+        r = await fetch(apiUrl(`/erase/${job_id}/status`), { cache: "no-store" });
+      } catch {
+        await wait();
+        continue;
+      }
+      if (r.status === 200) {
+        const d = await r.json();
+        return { canUndo: Boolean(d?.can_undo), engine: String(d?.engine ?? engine) };
+      }
+      if (r.status === 409 || r.status === 502 || r.status === 503 || r.status === 504) {
+        await wait();
+        continue;
+      }
+      const body = await r.json().catch(() => ({}));
+      throw new ApiError(body?.error?.message ?? `erase failed (${r.status})`);
+    }
+  } finally {
+    source.close();
+  }
 }
 
 /** Undo the most recent processed erase on the server; restores the pre-erase scene.
