@@ -296,8 +296,13 @@ async def segment(
 
 @router.get("/engines")
 async def engines_status() -> JSONResponse:
-    """Per-engine load state for the removal picker: idle | loading | ready | error."""
-    return JSONResponse({"engines": erase_engines.engine_status()})
+    """Removal engines: which this install offers (`enabled`), each one's load state
+    (idle | loading | ready | error), and the last error per engine for diagnosis."""
+    return JSONResponse({
+        "engines": erase_engines.engine_status(),
+        "enabled": erase_engines.enabled_engines(),
+        "errors": erase_engines.engine_errors(),
+    })
 
 
 @router.post("/warm")

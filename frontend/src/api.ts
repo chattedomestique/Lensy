@@ -138,14 +138,26 @@ export async function selectSubject(
 
 export type EraseEngine = "lama" | "objectclear" | "flux";
 
-/** Per-engine load state for the removal picker. */
-export async function engineStatus(): Promise<Record<string, string>> {
+export interface EnginesInfo {
+  engines: Record<string, string>; // load state per engine: idle | loading | ready | error
+  enabled: EraseEngine[]; // which engines this install offers (the picker shows only these)
+  errors: Record<string, string>; // last error per engine, for diagnosis
+}
+
+/** Removal-engine availability + state for the picker. Defaults to LaMa-only if unreachable. */
+export async function engineStatus(): Promise<EnginesInfo> {
+  const fallback: EnginesInfo = { engines: {}, enabled: ["lama"], errors: {} };
   try {
     const r = await fetch(apiUrl("/engines"));
-    if (!r.ok) return {};
-    return (await r.json())?.engines ?? {};
+    if (!r.ok) return fallback;
+    const d = await r.json();
+    return {
+      engines: d?.engines ?? {},
+      enabled: (Array.isArray(d?.enabled) && d.enabled.length ? d.enabled : ["lama"]) as EraseEngine[],
+      errors: d?.errors ?? {},
+    };
   } catch {
-    return {};
+    return fallback;
   }
 }
 

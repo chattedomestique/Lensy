@@ -65,17 +65,36 @@ _FLUX_TIMEOUT = int(os.environ.get("VANISH_FLUX_TIMEOUT", "1800"))  # 30 min cei
 # time. Off by default (roomier machines keep both warm for instant switching); set =1 on the mini.
 _LOW_MEM = os.environ.get("VANISH_LOW_MEM", "").strip().lower() in ("1", "true", "yes", "on")
 
+# VANISH_ENGINES: which removal engines this install offers, comma-separated. Lets a machine WITHOUT
+# ComfyUI drop Flux ("lama,objectclear") so the picker never even shows Reconstruct. LaMa is always
+# available (it's the fallback). Default: all three.
+_ENABLED = [e.strip() for e in os.environ.get("VANISH_ENGINES", "lama,objectclear,flux").split(",")
+            if e.strip() in ENGINE_NAMES]
+if "lama" not in _ENABLED:
+    _ENABLED = ["lama", *_ENABLED]
+
 # lazy singletons + serialization
 _load_lock = threading.Lock()
 _infer_lock = threading.Lock()
 _engines: dict[str, object] = {}
 _status: dict[str, str] = {"lama": "idle", "objectclear": "idle", "flux": "idle"}
+_errors: dict[str, str] = {}  # last load/run error per engine (surfaced by /engines for diagnosis)
 _comfy_proc: subprocess.Popen | None = None
 
 
 def engine_status() -> dict[str, str]:
     """Per-engine load state: idle | loading | ready | error (LaMa reflects the bundle)."""
     return dict(_status)
+
+
+def enabled_engines() -> list[str]:
+    """Which engines this install offers (VANISH_ENGINES); the picker shows only these."""
+    return list(_ENABLED)
+
+
+def engine_errors() -> dict[str, str]:
+    """Last error per engine, for diagnosing a failed heavy engine from /engines."""
+    return dict(_errors)
 
 
 def set_lama_status(ready: bool) -> None:
@@ -190,11 +209,11 @@ def _get_objectclear():
             import torch
             from objectclear.pipelines import ObjectClearPipeline
         except Exception as e:  # noqa: BLE001
+            msg = (f"ObjectClear deps not available ({e.__class__.__name__}: {e}). Expected the "
+                   f"`objectclear` package under {_OC_REPO} (set VANISH_OC_REPO) and `diffusers` installed.")
             _status["objectclear"] = "error"
-            raise EngineUnavailable(
-                f"ObjectClear deps not available ({e.__class__.__name__}: {e}). Expected the "
-                f"`objectclear` package under {_OC_REPO} and `diffusers` installed."
-            ) from e
+            _errors["objectclear"] = msg
+            raise EngineUnavailable(msg) from e
         try:
             dev = "mps" if torch.backends.mps.is_available() else "cpu"
             pipe = ObjectClearPipeline.from_pretrained_with_custom_modules(
@@ -203,8 +222,10 @@ def _get_objectclear():
             )
             pipe.to(dev)
         except Exception as e:  # noqa: BLE001
+            msg = f"ObjectClear failed to load ({e.__class__.__name__}: {e})"
             _status["objectclear"] = "error"
-            raise EngineUnavailable(f"ObjectClear failed to load ({e.__class__.__name__}: {e})") from e
+            _errors["objectclear"] = msg
+            raise EngineUnavailable(msg) from e
         _engines["objectclear"] = pipe
         _status["objectclear"] = "ready"
         return pipe
@@ -270,11 +291,11 @@ def _ensure_comfy() -> None:
             _status["flux"] = "ready"
             return
         if not Path(_COMFY_PY).exists() or not (_COMFY_DIR / "main.py").exists():
+            msg = (f"ComfyUI not found (expected {_COMFY_DIR}/main.py and {_COMFY_PY}). Set "
+                   "VANISH_COMFY_DIR / VANISH_COMFY_PY, or drop Flux via VANISH_ENGINES=lama,objectclear.")
             _status["flux"] = "error"
-            raise EngineUnavailable(
-                f"ComfyUI not found (expected {_COMFY_DIR}/main.py and {_COMFY_PY}). "
-                "Set VANISH_COMFY_DIR / VANISH_COMFY_PY."
-            )
+            _errors["flux"] = msg
+            raise EngineUnavailable(msg)
         _free_for("flux")  # low-mem: free ObjectClear (and the MPS cache) before launching ComfyUI
         _status["flux"] = "loading"
         env = dict(os.environ)
@@ -291,6 +312,7 @@ def _ensure_comfy() -> None:
                 return
             time.sleep(1.0)
         _status["flux"] = "error"
+        _errors["flux"] = "ComfyUI failed to start within the timeout"
         raise EngineUnavailable("ComfyUI failed to start within the timeout")
 
 
@@ -420,7 +442,8 @@ def run_engine(engine: str, rgb_u8: np.ndarray, mask_u8: np.ndarray, params: dic
                progress: Progress, bundle: ModelBundle) -> tuple[np.ndarray, str]:
     """Run the chosen removal engine. Returns (cleaned_rgb_u8, engine_actually_used). A heavy engine
     that can't load (missing deps/models) falls back to LaMa so the erase never hard-fails."""
-    engine = engine if engine in _RUNNERS else "lama"
+    # only offer enabled engines (VANISH_ENGINES); anything else routes to LaMa
+    engine = engine if (engine in _RUNNERS and engine in _ENABLED) else "lama"
     fn = _RUNNERS[engine]
     try:
         return fn(rgb_u8, mask_u8, params or {}, progress, bundle), engine
@@ -428,6 +451,7 @@ def run_engine(engine: str, rgb_u8: np.ndarray, mask_u8: np.ndarray, params: dic
         if engine == "lama":
             raise  # LaMa is the last resort; let it surface
         _status[engine] = "error"
+        _errors[engine] = f"{e.__class__.__name__}: {e}"
         log.warning("%s failed (%s: %s); falling back to LaMa", engine, e.__class__.__name__, e)
         progress(0.1, "Quick Erase (fallback)")
         return _run_lama(rgb_u8, mask_u8, params or {}, progress, bundle), "lama"
@@ -441,8 +465,9 @@ def warm_engine(engine: str) -> None:
                 _get_objectclear()
             elif engine == "flux":
                 _ensure_comfy()
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             _status[engine] = "error"
+            _errors.setdefault(engine, f"{e.__class__.__name__}: {e}")
 
     threading.Thread(target=_w, daemon=True).start()
 

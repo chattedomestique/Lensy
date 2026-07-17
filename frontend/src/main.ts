@@ -147,6 +147,14 @@ const ENGINE_LABELS: Record<EraseEngine, string> = {
   objectclear: "Deep Clean",
   flux: "Reconstruct",
 };
+const ENGINE_CHIPS: Record<EraseEngine, string> = {
+  lama: "Quick",
+  objectclear: "Deep Clean",
+  flux: "Reconstruct",
+};
+// which engines the backend offers (VANISH_ENGINES) — the picker shows only these. Filled from
+// /engines; a machine without ComfyUI reports ["lama","objectclear"], so Reconstruct never shows.
+let enabledEngines: EraseEngine[] = ["lama", "objectclear", "flux"];
 let brushSize = 4; // % of the long edge
 let brushHardness = 0.5; // 0 soft → 1 hard
 
@@ -619,13 +627,21 @@ function bindDrag(): void {
   dragSurface.addEventListener("pointercancel", end);
 }
 
-// reflect each removal engine's load state (idle/loading/ready/error) on its picker chip
+// reflect engine availability + load state (idle/loading/ready/error) on the picker chips
 async function refreshEngineStatus(): Promise<void> {
-  const st = await engineStatus();
+  const info = await engineStatus();
+  // if the offered set changed (e.g. this machine has no ComfyUI → no Flux), rebuild the picker
+  if (info.enabled.length && info.enabled.join() !== enabledEngines.join()) {
+    enabledEngines = info.enabled;
+    if (!enabledEngines.includes(eraseEngine)) eraseEngine = "lama";
+    if (activeTool.erase) buildSubrow();
+  }
   subrow.querySelectorAll<HTMLButtonElement>(".chip[data-engine]").forEach((c) => {
-    const s = st[c.dataset.engine ?? ""] ?? "";
+    const e = (c.dataset.engine ?? "") as EraseEngine;
+    const s = info.engines[e] ?? "";
     c.classList.toggle("engine-loading", s === "loading");
     c.classList.toggle("engine-error", s === "error");
+    if (s === "error" && info.errors[e]) c.title = `${ENGINE_LABELS[e]} — ${info.errors[e]}`;
   });
 }
 
@@ -638,14 +654,10 @@ function buildEraseActions(): void {
     b.addEventListener("click", on);
     return b;
   };
-  // engine picker: Quick (instant) · Deep Clean (+shadow/reflection) · Reconstruct (max fidelity)
-  const engines: [EraseEngine, string][] = [
-    ["lama", "Quick"],
-    ["objectclear", "Deep Clean"],
-    ["flux", "Reconstruct"],
-  ];
-  for (const [e, label] of engines) {
-    const chip = mk(label, "", () => {
+  // engine picker: Quick (instant) · Deep Clean (+shadow/reflection) · Reconstruct (max fidelity).
+  // Only the engines this backend offers (VANISH_ENGINES) are shown — no ComfyUI → no Reconstruct.
+  for (const e of enabledEngines) {
+    const chip = mk(ENGINE_CHIPS[e], "", () => {
       eraseEngine = e;
       subrow.querySelectorAll<HTMLButtonElement>(".chip[data-engine]").forEach((c) =>
         c.setAttribute("aria-pressed", String(c.dataset.engine === e)),
@@ -1040,3 +1052,12 @@ bindDrag();
 bindCompare();
 selectTool(TOOLS[0]);
 setupServerPanel();
+
+// learn which removal engines this backend offers (VANISH_ENGINES), so the picker only shows the
+// available ones — a machine without ComfyUI reports no Flux, so Reconstruct never appears.
+void engineStatus().then((info) => {
+  if (info.enabled.length) {
+    enabledEngines = info.enabled;
+    if (!enabledEngines.includes(eraseEngine)) eraseEngine = "lama";
+  }
+});
