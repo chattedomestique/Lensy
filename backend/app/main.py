@@ -31,8 +31,13 @@ log = logging.getLogger("lensy")
 async def lifespan(app: FastAPI):
     log.info("Lensy warming up — loading models…")
     app.state.bundle = load_bundle()
+    # reflect LaMa's availability in the removal-engine status; heavy engines lazy-load on demand.
+    from .pipeline import erase_engines
+
+    erase_engines.set_lama_status(app.state.bundle.inpaint_model is not None)
     log.info("Lensy ready.")
     yield
+    erase_engines.shutdown()  # terminate the ComfyUI child, if Flux launched one
     app.state.bundle = None
     log.info("Lensy shut down.")
 

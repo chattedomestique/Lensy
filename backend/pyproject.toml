@@ -36,6 +36,14 @@ models = [
     "imageio>=2.34",
     "addict>=2.4",
 ]
+# Object-removal engines beyond LaMa (§ app/pipeline/erase_engines.py). All optional and lazy: a
+# missing dep just means that engine falls back to LaMa. ObjectClear also needs the `objectclear`
+# package on sys.path and Flux needs a ComfyUI install — both come from the existing
+# ~/object-removal-studio layout (overridable via VANISH_* env vars), not pip.
+removal = [
+    "diffusers>=0.27",          # ObjectClear pipeline (SDXL-based, +shadow/reflection removal)
+    "websocket-client>=1.7",    # optional: real per-step % from ComfyUI during a Flux run
+]
 dev = [
     "ruff>=0.4",
     "pytest>=8.0",

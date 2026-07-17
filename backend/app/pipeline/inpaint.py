@@ -39,13 +39,14 @@ def fill_background(rgb_u8: np.ndarray, alpha: np.ndarray, bundle: ModelBundle) 
 # the final image — we cap LaMa's working long-edge and upscale the result. Big speedup.
 _LAMA_MAX_EDGE = int(os.environ.get("LENSY_LAMA_MAX_EDGE", "768"))
 # The user-facing "erase an object" fill is seen SHARP (not blurred behind the subject), so it
-# runs at a higher resolution than the background plate — quality matters more than speed here.
-_ERASE_MAX_EDGE = int(os.environ.get("LENSY_ERASE_MAX_EDGE", "1536"))
+# runs at the full working resolution — quality matters more than speed here (Vanish caps at 2048).
+_ERASE_MAX_EDGE = int(os.environ.get("LENSY_ERASE_MAX_EDGE", "2048"))
 
 
 def erase_region(rgb_u8: np.ndarray, mask_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
     """Remove whatever the mask covers (white = erase) and fill it plausibly. Used by the
-    interactive object-removal tool, so the fill is kept high-res. Returns uint8 RGB."""
+    interactive object-removal tool, so the fill is kept high-res and blended in with a feathered
+    composite (the fill is seen sharp, so a hard seam would show). Returns uint8 RGB."""
     h, w = rgb_u8.shape[:2]
     grow = max(3, (min(h, w) // 200) | 1)  # small grow so no rim of the object survives
     hole = cv2.dilate(
@@ -56,14 +57,18 @@ def erase_region(rgb_u8: np.ndarray, mask_u8: np.ndarray, bundle: ModelBundle) -
         return rgb_u8
     if bundle.inpaint_model is not None:
         try:
-            return _lama_fill(rgb_u8, hole, bundle, max_edge=_ERASE_MAX_EDGE)
+            return _lama_fill(rgb_u8, hole, bundle, max_edge=_ERASE_MAX_EDGE, feather=True)
         except Exception as e:
             log.warning("LaMa erase failed (%s); using cv2.inpaint fallback", e.__class__.__name__)
     return _cv2_fill(rgb_u8, hole)
 
 
 def _lama_fill(
-    rgb_u8: np.ndarray, hole_u8: np.ndarray, bundle: ModelBundle, max_edge: int = _LAMA_MAX_EDGE
+    rgb_u8: np.ndarray,
+    hole_u8: np.ndarray,
+    bundle: ModelBundle,
+    max_edge: int = _LAMA_MAX_EDGE,
+    feather: bool = False,
 ) -> np.ndarray:
     from PIL import Image
 
@@ -81,10 +86,18 @@ def _lama_fill(
     arr = np.array(out.convert("RGB"))
     if arr.shape[:2] != (h, w):
         arr = cv2.resize(arr, (w, h), interpolation=cv2.INTER_LINEAR)
-    # keep the original (sharp) pixels outside the hole; only the filled hole comes from LaMa
-    keep = (hole_u8 == 0)
-    arr[keep] = rgb_u8[keep]
-    return arr
+    if not feather:
+        # keep the original (sharp) pixels outside the hole; only the filled hole comes from LaMa
+        arr[hole_u8 == 0] = rgb_u8[hole_u8 == 0]
+        return arr
+    # feathered composite: blend LaMa's fill into the original across a soft band inside the hole so
+    # the seam is invisible when seen sharp. The feather stays *within* the hole (the object region)
+    # so no original object pixels bleed back in.
+    r = max(2.0, min(h, w) / 400.0)
+    inner = cv2.erode(hole_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(r) * 2 + 1,) * 2))
+    a = cv2.GaussianBlur(inner.astype(np.float32) / 255.0, (0, 0), sigmaX=r)[..., None]
+    blended = arr.astype(np.float32) * a + rgb_u8.astype(np.float32) * (1.0 - a)
+    return np.clip(blended, 0, 255).astype(np.uint8)
 
 
 def _cv2_fill(rgb_u8: np.ndarray, hole_u8: np.ndarray) -> np.ndarray:
