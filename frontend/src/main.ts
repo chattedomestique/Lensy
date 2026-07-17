@@ -792,9 +792,11 @@ function renderParams(): RenderParams {
 }
 
 // ---- render (debounced on finger-lift) ----
-function setProgress(label: string, show = true): void {
+function setProgress(label: string, show = true, frac?: number): void {
   progress.classList.toggle("hidden", !show);
-  progressLabel.textContent = label;
+  // show an actual percentage when the backend reports one (0..1), e.g. "Rendering the lens · 71%"
+  const pct = typeof frac === "number" && isFinite(frac) ? ` · ${Math.min(100, Math.max(0, Math.round(frac * 100)))}%` : "";
+  progressLabel.textContent = label + pct;
 }
 
 function scheduleRender(): void {
@@ -809,7 +811,9 @@ async function doRender(): Promise<void> {
   let handle: RenderHandle | null = null;
   try {
     const depthPng = await editor.exportDepthPng();
-    handle = renderFromAnalyze(analyzeId, depthPng, renderParams(), (p) => setProgress(p.label));
+    handle = renderFromAnalyze(analyzeId, depthPng, renderParams(), (p) =>
+      setProgress(p.label, true, p.progress),
+    );
     inflight = handle;
     const url = await handle.done;
     if (resultUrl) URL.revokeObjectURL(resultUrl);

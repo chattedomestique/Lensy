@@ -71,14 +71,32 @@ def _sam2_mask(rgb_u8, points_xy, labels, box, bundle) -> np.ndarray:
 
 
 def restrict_matte(matte_full: np.ndarray, sel_u8: np.ndarray) -> np.ndarray:
-    """Keep the soft matte only where the subject was tapped. A generous dilation + soft falloff so
-    hair just outside the SAM2 mask survives (matting quality), while other salient people elsewhere
-    in the frame drop out of the subject and fall back to the depth-blurred background."""
+    """Keep the subject matte only where you tapped — and make it work for *objects*, not just
+    people.
+
+    For a salient subject (a person/animal that BiRefNet already mattes), we gate BiRefNet's fine
+    soft alpha to the tapped region: a generous dilation + soft falloff so hair just outside the
+    SAM2 mask survives, while other salient people elsewhere drop out and fall back to the blurred
+    background. But BiRefNet is trained on salient subjects, so it returns ~0 over an ordinary
+    object (a mug, a plant, a bike) — gating a zero matte gave an empty subject, which is why "make
+    this the subject" only worked on people. So when the tapped region isn't well covered by the
+    salient matte, we build the subject matte from the **SAM2 selection itself** (feathered), so any
+    tapped object can become the in-focus subject."""
     h, w = matte_full.shape[:2]
     grow = max(5, (min(h, w) // 120) | 1)
     dil = cv2.dilate(sel_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
-    soft = cv2.GaussianBlur(dil.astype(np.float32) / 255.0, (0, 0), sigmaX=max(2.0, grow * 0.5))
-    return np.clip(matte_full.astype(np.float32) * soft, 0.0, 1.0).astype(np.float32)
+    gate = cv2.GaussianBlur(dil.astype(np.float32) / 255.0, (0, 0), sigmaX=max(2.0, grow * 0.5))
+    person = np.clip(matte_full.astype(np.float32) * gate, 0.0, 1.0)  # BiRefNet detail within the tap
+
+    sel = sel_u8 > 127
+    # how much of the tapped object does the salient matte actually cover? high → a person/animal
+    # (keep BiRefNet's hair-grade matte, unchanged); low → an ordinary object BiRefNet ignores.
+    covered = float((matte_full[sel] > 0.4).mean()) if bool(sel.any()) else 0.0
+    if covered >= 0.4:
+        return person.astype(np.float32)
+    # object case: use the SAM2 selection as the matte, feathered so the blur/erase edge stays soft.
+    obj = cv2.GaussianBlur(sel_u8.astype(np.float32) / 255.0, (0, 0), sigmaX=max(1.5, grow * 0.4))
+    return np.clip(np.maximum(person, obj), 0.0, 1.0).astype(np.float32)
 
 
 def _grabcut_mask(rgb_u8, points_xy, box) -> np.ndarray:
