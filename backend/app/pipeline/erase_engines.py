@@ -60,6 +60,10 @@ _WF_PATH = Path(os.environ.get("VANISH_FLUX_WORKFLOW", str(_STUDIO / "workflows"
 _COMFY_ARGS = os.environ.get("VANISH_COMFY_ARGS", "--lowvram").split()
 _COMFY_START_TIMEOUT = int(os.environ.get("VANISH_COMFY_START_TIMEOUT", "300"))
 _FLUX_TIMEOUT = int(os.environ.get("VANISH_FLUX_TIMEOUT", "1800"))  # 30 min ceiling for a lowvram run
+# VANISH_LOW_MEM: on a memory-tight machine (the 16 GB mini) the two heavy engines can't be resident
+# together, so loading one first unloads the other and frees the MPS cache — only one big model at a
+# time. Off by default (roomier machines keep both warm for instant switching); set =1 on the mini.
+_LOW_MEM = os.environ.get("VANISH_LOW_MEM", "").strip().lower() in ("1", "true", "yes", "on")
 
 # lazy singletons + serialization
 _load_lock = threading.Lock()
@@ -123,6 +127,52 @@ def _run_lama(rgb_u8: np.ndarray, mask_u8: np.ndarray, params: dict, progress: P
     return out
 
 
+# ---- low-memory engine juggling (VANISH_LOW_MEM) -------------------------------------------------
+
+
+def _free_mps() -> None:
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _unload_engine(name: str) -> None:
+    """Drop a heavy engine and free its memory. Called under `_load_lock`."""
+    if name == "objectclear":
+        pipe = _engines.pop("objectclear", None)
+        if pipe is not None:
+            try:
+                pipe.to("cpu")  # release MPS allocations before dropping the reference
+            except Exception:  # noqa: BLE001
+                pass
+            del pipe
+            _status["objectclear"] = "idle"
+            import gc
+
+            gc.collect()
+            _free_mps()
+            log.info("VANISH_LOW_MEM: unloaded ObjectClear")
+    elif name == "flux" and _comfy_proc is not None:
+        shutdown()  # terminate the ComfyUI child (frees its process + weights)
+        _status["flux"] = "idle"
+        log.info("VANISH_LOW_MEM: stopped ComfyUI (Flux)")
+
+
+def _free_for(target: str) -> None:
+    """VANISH_LOW_MEM: before loading `target`, unload every OTHER heavy engine so only one big
+    model is resident at once. Also frees the MPS cache. No-op unless VANISH_LOW_MEM is set."""
+    if not _LOW_MEM:
+        return
+    for name in ("objectclear", "flux"):
+        if name != target:
+            _unload_engine(name)
+    _free_mps()
+
+
 # ---- ObjectClear (diffusers; removes object + shadow/reflection) ---------------------------------
 
 
@@ -130,6 +180,7 @@ def _get_objectclear():
     with _load_lock:
         if "objectclear" in _engines:
             return _engines["objectclear"]
+        _free_for("objectclear")  # low-mem: free Flux (and the MPS cache) before loading ObjectClear
         _status["objectclear"] = "loading"
         try:
             import sys
@@ -224,6 +275,7 @@ def _ensure_comfy() -> None:
                 f"ComfyUI not found (expected {_COMFY_DIR}/main.py and {_COMFY_PY}). "
                 "Set VANISH_COMFY_DIR / VANISH_COMFY_PY."
             )
+        _free_for("flux")  # low-mem: free ObjectClear (and the MPS cache) before launching ComfyUI
         _status["flux"] = "loading"
         env = dict(os.environ)
         env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
