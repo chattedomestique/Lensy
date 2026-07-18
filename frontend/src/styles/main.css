@@ -274,13 +274,6 @@ canvas.stage-img { image-rendering: auto; }
   color: var(--text); border-color: var(--line);
   background: var(--surface-3);
 }
-/* thin divider between the engine picker and the target toggle in the erase row */
-.chip-sep { flex: 0 0 auto; width: 1px; align-self: stretch; margin: 5px 4px; background: var(--line); }
-/* engine picker chip states: loading pulses, error tints with the accent */
-.chip.engine-loading { animation: chip-pulse 1.1s var(--spring) infinite; }
-.chip.engine-error { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
-@keyframes chip-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-
 .shapes { display: flex; gap: var(--s1); margin-left: auto; }
 .chip.shape { min-width: 34px; text-align: center; padding: 7px 8px; }
 /* the erase action is the one deliberate primary — a small accent-filled chip, pushed to the right */

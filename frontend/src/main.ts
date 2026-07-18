@@ -7,19 +7,16 @@ import "./styles/main.css";
 import { registerSW } from "virtual:pwa-register";
 import {
   ApiError,
-  type EraseEngine,
   type RenderParams,
   analyze,
   depthUrl,
   eraseObject,
-  engineStatus,
   matteUrl,
   photoUrl,
   renderFromAnalyze,
   segment,
   selectSubject,
   undoEdit,
-  warmEngine,
   type RenderHandle,
 } from "./api";
 import { DepthEditor } from "./depth";
@@ -138,15 +135,6 @@ const TOOLS: Tool[] = [
 ];
 let refineMode: "sharpen" | "recede" | "dissolve" = "sharpen";
 let eraseTarget: "auto" | "subject" | "background" = "auto";
-// object-removal engine: Quick (LaMa, instant) · Deep Clean (ObjectClear, +shadow/reflection) ·
-// Reconstruct (Flux, max fidelity, slow). Heavy engines lazy-load and fall back to LaMa if absent.
-let eraseEngine: EraseEngine = "lama";
-const eraseSteps = 20; // diffusion steps for ObjectClear / Flux
-const ENGINE_LABELS: Record<EraseEngine, string> = {
-  lama: "Quick Erase",
-  objectclear: "Deep Clean",
-  flux: "Reconstruct",
-};
 let brushSize = 4; // % of the long edge
 let brushHardness = 0.5; // 0 soft → 1 hard
 
@@ -619,16 +607,6 @@ function bindDrag(): void {
   dragSurface.addEventListener("pointercancel", end);
 }
 
-// reflect each removal engine's load state (idle/loading/ready/error) on its picker chip
-async function refreshEngineStatus(): Promise<void> {
-  const st = await engineStatus();
-  subrow.querySelectorAll<HTMLButtonElement>(".chip[data-engine]").forEach((c) => {
-    const s = st[c.dataset.engine ?? ""] ?? "";
-    c.classList.toggle("engine-loading", s === "loading");
-    c.classList.toggle("engine-error", s === "error");
-  });
-}
-
 // ---- erase (object removal) ----
 function buildEraseActions(): void {
   const mk = (label: string, cls: string, on: () => void) => {
@@ -638,32 +616,6 @@ function buildEraseActions(): void {
     b.addEventListener("click", on);
     return b;
   };
-  // engine picker: Quick (instant) · Deep Clean (+shadow/reflection) · Reconstruct (max fidelity)
-  const engines: [EraseEngine, string][] = [
-    ["lama", "Quick"],
-    ["objectclear", "Deep Clean"],
-    ["flux", "Reconstruct"],
-  ];
-  for (const [e, label] of engines) {
-    const chip = mk(label, "", () => {
-      eraseEngine = e;
-      subrow.querySelectorAll<HTMLButtonElement>(".chip[data-engine]").forEach((c) =>
-        c.setAttribute("aria-pressed", String(c.dataset.engine === e)),
-      );
-      if (e !== "lama") {
-        warmEngine(e); // start loading the heavy model while the user brushes
-        void refreshEngineStatus();
-        window.setTimeout(() => void refreshEngineStatus(), 2500);
-      }
-    });
-    chip.dataset.engine = e;
-    chip.setAttribute("aria-pressed", String(e === eraseEngine));
-    subrow.appendChild(chip);
-  }
-  void refreshEngineStatus();
-  const sep = document.createElement("span");
-  sep.className = "chip-sep";
-  subrow.appendChild(sep);
   // target toggle: which layer the erase is allowed to touch
   const targets: [typeof eraseTarget, string][] = [
     ["auto", "Auto"],
@@ -759,18 +711,10 @@ async function doErase(): Promise<void> {
     return;
   }
   inflight?.cancel();
-  setProgress(`${ENGINE_LABELS[eraseEngine]}…`);
-  if (eraseEngine === "flux") toast("Reconstruct can take 10–15 min on 16 GB — the % shows progress.");
+  setProgress("Erasing…");
   try {
     const mask = await eraseSel.exportPng();
-    const { canUndo: cu, engine: used } = await eraseObject(
-      analyzeId,
-      mask,
-      eraseTarget,
-      eraseEngine,
-      eraseSteps,
-      (p) => setProgress(p.label, true, p.progress ?? undefined),
-    );
+    const { canUndo: cu } = await eraseObject(analyzeId, mask, eraseTarget);
     setUndo(cu); // the processed erase can now be undone
     dataVersion++;
     // the scene changed — reload depth/matte and the cleaned source photo
@@ -780,11 +724,7 @@ async function doErase(): Promise<void> {
     eraseSel.init(analyzeW, analyzeH, eraseLayer); // reset selection for more removals
     setProgress("", false);
     void doRender(); // refresh the cached render behind the scenes
-    if (used !== eraseEngine) {
-      toast(`${ENGINE_LABELS[eraseEngine]} wasn't available — used Quick Erase instead.`);
-    } else {
-      toast("Erased. Undo up top if needed, or switch tools to style it.");
-    }
+    toast("Erased. Undo up top if needed, or switch tools to style it.");
   } catch (err) {
     setProgress("", false);
     toast(err instanceof ApiError ? err.message : "Erase failed.");
@@ -872,7 +812,7 @@ async function doRender(): Promise<void> {
   try {
     const depthPng = await editor.exportDepthPng();
     handle = renderFromAnalyze(analyzeId, depthPng, renderParams(), (p) =>
-      setProgress(p.label, true, p.progress ?? undefined),
+      setProgress(p.label, true, p.progress),
     );
     inflight = handle;
     const url = await handle.done;

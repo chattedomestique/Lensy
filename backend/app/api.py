@@ -30,7 +30,6 @@ from PIL import Image, ImageOps
 from .pipeline import (
     RenderParams, analyze, downscale_to_working, erase, precompose, render_from, run_pipeline,
 )
-from .pipeline import erase_engines
 from .pipeline.segment import restrict_matte, segment_at
 
 log = logging.getLogger("lensy.api")
@@ -51,8 +50,7 @@ _MAX_EXPORT_EDGE = int(os.environ.get("LENSY_MAX_EXPORT_EDGE", "6144"))
 class Job:
     id: str
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    result_jpeg: bytes | None = None       # render jobs: the finished JPEG
-    payload: dict | None = None            # non-image jobs (erase): the final JSON result
+    result_jpeg: bytes | None = None
     error: str | None = None
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -294,35 +292,15 @@ async def segment(
     return Response(content=_encode_png_gray(mask.astype(np.float32) / 255.0), media_type="image/png")
 
 
-@router.get("/engines")
-async def engines_status() -> JSONResponse:
-    """Per-engine load state for the removal picker: idle | loading | ready | error."""
-    return JSONResponse({"engines": erase_engines.engine_status()})
-
-
-@router.post("/warm")
-async def warm_engine(engine: str = Form(...)) -> JSONResponse:
-    """Preload a heavy removal engine in the background so the first erase isn't a cold start."""
-    if engine not in erase_engines.ENGINE_NAMES:
-        return _friendly(400, "bad_engine", f"unknown engine '{engine}'")
-    erase_engines.warm_engine(engine)
-    return JSONResponse({"warming": engine})
-
-
 @router.post("/erase")
 async def erase_object(
     request: Request,
     analyze_id: str = Form(...),
     mask: UploadFile = File(...),  # grayscale PNG, white = erase
     layer: str = Form("auto"),     # "auto" | "subject" | "background" — where the erase may act
-    engine: str = Form("lama"),    # lama (Quick) | objectclear (Deep Clean) | flux (Reconstruct)
-    steps: int = Form(20),         # diffusion steps for objectclear / flux
-    seed: int = Form(0),
 ) -> JSONResponse:
-    """Fill the masked region with the chosen removal engine and re-derive matte + depth on the
-    cleaned image. Runs as a background JOB (Flux can take 10–15 min): returns {job_id}; the client
-    streams a real % over /erase/{job_id}/events and polls /erase/{job_id}/status for the result.
-    The analysis is updated in place once done; the client then reloads depth/matte/photo."""
+    """Fill the masked region plausibly (LaMa) and re-derive matte + depth on the cleaned image.
+    The analysis is updated in place; the client then reloads depth/matte/photo and re-renders."""
     bundle = getattr(request.app.state, "bundle", None)
     if bundle is None:
         return _friendly(503, "warming", "Models are still loading — try again in a moment.")
@@ -351,92 +329,21 @@ async def erase_object(
         if int((mask_u8 > 127).sum()) == 0:
             return _friendly(400, "empty_mask", f"Nothing on the {layer} to erase there.")
 
-    eng = engine if engine in erase_engines.ENGINE_NAMES else "lama"
-    eng_params = {"steps": int(steps), "seed": int(seed)}
     params = RenderParams(working_res=max(h, w))  # already at working res — don't downscale
-    src = a.work  # snapshot the pre-erase working image for the worker (no live reads)
-
-    if len(_JOBS) >= _MAX_JOBS:
-        for jid in list(_JOBS)[: len(_JOBS) - _MAX_JOBS + 1]:
-            _JOBS.pop(jid, None)
-    job = Job(id=uuid.uuid4().hex)
-    _JOBS[job.id] = job
     loop = asyncio.get_running_loop()
-
-    def progress_cb(key: str, label: str, frac: float | None) -> None:
-        loop.call_soon_threadsafe(
-            job.queue.put_nowait,
-            {"stage": key, "label": label, "progress": (None if frac is None else round(float(frac), 3))},
-        )
-
-    def do_erase():
-        return erase(src, params, bundle, mask_u8, eng, eng_params, progress_cb)
-
-    async def worker() -> None:
-        try:
-            cleaned, alpha, depth, used = await loop.run_in_executor(None, do_erase)
-            # apply the scene change on the EVENT LOOP (atomic w.r.t. renders, which snapshot at spawn)
-            _push_undo(a)  # snapshot the pre-erase scene so this processed erase can be undone
-            a.work, a.depth = cleaned, depth
-            a.matte_full = alpha
-            a.alpha = restrict_matte(alpha, a.subject_sel) if a.subject_sel is not None else alpha
-            a.fg = a.clean_bg = None  # invalidate the precompose cache — the scene changed
-            a.orig = None  # the full-res original no longer matches the erased image → render at work res
-            job.payload = {"ok": True, "can_undo": True, "width": w, "height": h, "engine": used}
-        except Exception as e:  # noqa: BLE001
-            log.exception("erase failed")
-            job.error = f"{e.__class__.__name__}: {e}"
-            loop.call_soon_threadsafe(
-                job.queue.put_nowait, {"stage": "error", "label": "Erase failed", "error": job.error}
-            )
-        finally:
-            loop.call_soon_threadsafe(job.done.set)
-
-    asyncio.create_task(worker())
-    return JSONResponse({"job_id": job.id})
-
-
-@router.get("/erase/{job_id}/events")
-async def erase_events(job_id: str) -> StreamingResponse:
-    job = _JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="unknown job")
-
-    async def event_stream():
-        while True:
-            try:
-                msg = await asyncio.wait_for(job.queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                if job.done.is_set() and job.queue.empty():
-                    break
-                yield ": keep-alive\n\n"
-                continue
-            if msg.get("stage") == "error":
-                yield f"event: error\ndata: {json.dumps(msg)}\n\n"
-                return
-            yield f"event: progress\ndata: {json.dumps(msg)}\n\n"
-        payload = job.payload if job.error is None else {"error": job.error}
-        ev = "done" if job.error is None else "error"
-        yield f"event: {ev}\ndata: {json.dumps(payload)}\n\n"
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
-    )
-
-
-@router.get("/erase/{job_id}/status")
-async def erase_job_status(job_id: str) -> JSONResponse:
-    """Poll the erase result (robust to a dropped SSE stream, like the render result endpoint)."""
-    job = _JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="unknown job")
-    if job.error:
-        return _friendly(500, "erase_failed", job.error)
-    if job.payload is None:
-        return _friendly(409, "not_ready", "Erase still in progress.")
-    return JSONResponse(job.payload)
+    try:
+        cleaned, alpha, depth = await loop.run_in_executor(None, erase, a.work, params, bundle, mask_u8)
+    except Exception as e:  # noqa: BLE001
+        log.exception("erase failed")
+        return _friendly(500, "erase_failed", f"{e.__class__.__name__}: {e}")
+    _push_undo(a)  # snapshot the pre-erase scene so this processed erase can be undone
+    a.work, a.depth = cleaned, depth
+    a.matte_full = alpha
+    a.alpha = restrict_matte(alpha, a.subject_sel) if a.subject_sel is not None else alpha
+    a.fg = None  # invalidate the precompose cache — the scene changed
+    a.clean_bg = None
+    a.orig = None  # the full-res original no longer matches the erased working image → render at work res
+    return JSONResponse({"ok": True, "width": w, "height": h, "can_undo": True})
 
 
 @router.post("/undo")
