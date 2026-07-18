@@ -116,37 +116,12 @@ def analyze(rgb_u8: np.ndarray, params: RenderParams, bundle: ModelBundle):
     return work, alpha.astype(np.float32), depth_norm.astype(np.float32)
 
 
-def erase(
-    work: np.ndarray,
-    params: RenderParams,
-    bundle: ModelBundle,
-    mask_u8: np.ndarray,
-    engine: str = "lama",
-    engine_params: dict | None = None,
-    progress: Progress | None = None,
-):
-    """Object removal: fill the masked region (white = erase) with the chosen engine, then re-derive
-    matte + depth on the cleaned image (removing something changes the scene). Returns
-    (cleaned_work, alpha, depth_norm, engine_used). Caller must drop any cached fg/clean_bg.
-
-    `engine` ∈ {lama, objectclear, flux} (§ erase_engines): LaMa is instant; ObjectClear also removes
-    the object's shadow/reflection; Flux is the max-fidelity fill. A heavy engine that can't load
-    falls back to LaMa. `progress(key, label, frac)` streams a real 0..1 completion fraction."""
-    from . import erase_engines as _engines
-
-    def eng_progress(frac: float | None, label: str) -> None:
-        if progress is not None:
-            # the engine is the heavy 90%; the matte+depth re-analysis is the last 10%
-            f = None if frac is None else 0.9 * float(frac)
-            progress("erase", label, f)
-
-    cleaned, used = _engines.run_engine(engine, work, mask_u8, engine_params, eng_progress, bundle)
-    if progress is not None:
-        progress("analyze", "Reading depth", 0.95)
-    cleaned_work, alpha, depth_norm = analyze(cleaned, params, bundle)
-    if progress is not None:
-        progress("done", "Done", 1.0)
-    return cleaned_work, alpha.astype(np.float32), depth_norm.astype(np.float32), used
+def erase(work: np.ndarray, params: RenderParams, bundle: ModelBundle, mask_u8: np.ndarray):
+    """Object removal: fill the masked region (white = erase) plausibly, then re-derive matte +
+    depth on the cleaned image (removing something changes the scene). Returns the same tuple as
+    analyze(): (cleaned_work, alpha, depth_norm). Caller must drop any cached fg/clean_bg."""
+    cleaned = _inpaint.erase_region(work, mask_u8, bundle)
+    return analyze(cleaned, params, bundle)
 
 
 def precompose(work: np.ndarray, alpha: np.ndarray, bundle: ModelBundle):
