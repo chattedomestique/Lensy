@@ -34,18 +34,21 @@ The pipeline is built so it **runs before every heavy model is present**. Each s
 | Matte          | BiRefNet (HR)              | classic GrabCut / luminance     |
 | Refine         | guided filter (ximgproc)   | bilateral / box                 |
 | Decontaminate  | pymatting `estimate_fg_ml` | premultiplied passthrough       |
-| Depth          | Depth Anything V2          | radial / luminance disparity    |
+| Depth          | Apple Depth Pro (fp16)     | Depth Anything V2 → radial      |
 | Inpaint        | LaMa (big-lama)            | `cv2.inpaint` (Telea)           |
 | Blur           | linear-light scatter (ours)| —  (always available, MPS-safe) |
 
 So a first render works immediately; quality climbs as `setup.sh` finishes caching weights.
 
 ### Implementation notes (deviations from the brief)
-- **Depth: Depth Anything V2, not Apple Depth Pro.** The brief's first pick was Depth Pro,
-  but on a 16 GB M4 it took **60–130 s/render and leaked MPS memory** (degrading each run).
-  Depth Anything V2 runs in **~0.2–1 s**, is stable, and — because depth here only grades the
-  blur *falloff* (the clean edge comes from matte → decontaminate → inpaint) — costs nothing on
-  the edge gate. Override the tier with `LENSY_DEPTH_MODEL`.
+- **Depth: Apple Depth Pro (the brief's first pick), run once per import.** Depth Pro has the
+  best boundary / thin-structure (hair, fur) recall, which is what protects the edge. It's heavy
+  (~1.9 GB, 1536² inference), so on a 16 GB Mac it's loaded in **fp16** (`LENSY_DEPTH_FP16`,
+  ~halves resident + peak memory) and, crucially, runs **once per import** — not per render.
+  Depth feeds an *editable* disparity map that's cached, so every later slider edit reuses it and
+  stays ~2–3 s; the ~40–130 s Depth Pro pass is paid once, on import. If memory is tight, set
+  `LENSY_DEPTH_MODEL=da3mono` (fast ~1.5 s Depth Anything V3) or a `Depth-Anything-V2-*` id; both
+  fall back automatically if the primary can't load.
 - **LaMa runs on CPU at reduced resolution.** `big-lama.pt` is CUDA-traced (won't load on a
   CUDA-less Mac) and uses FFT convs that are flaky on MPS, so it runs on CPU. Since the fill is
   only ever seen *blurred and behind* the sharp subject, it's computed at ≤768 px long edge and

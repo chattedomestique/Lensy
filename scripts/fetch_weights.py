@@ -25,7 +25,8 @@ def _try(name: str, fn) -> bool:
         return False
 
 
-DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "depth-anything/Depth-Anything-V2-Large-hf")
+DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "apple/DepthPro-hf")
+DEPTH_FALLBACK_ID = "depth-anything/Depth-Anything-V2-Large-hf"
 
 
 MATTE_MODEL_ID = os.environ.get("LENSY_MATTE_MODEL", "ZhengPeng7/BiRefNet_HR-matting")
@@ -43,11 +44,20 @@ def fetch_depth() -> None:
 
         DepthProImageProcessor.from_pretrained(DEPTH_MODEL_ID)
         DepthProForDepthEstimation.from_pretrained(DEPTH_MODEL_ID)
-    else:
+    elif "/" in DEPTH_MODEL_ID:  # a HF depth id (da3mono is a package shorthand, cached separately)
         from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
         AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
         AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID)
+
+
+def fetch_depth_fallback() -> None:
+    """Always cache Depth-Anything-V2-Large — the reliable fallback if the primary depth model
+    (Depth Pro by default) can't load on a given machine."""
+    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+    AutoImageProcessor.from_pretrained(DEPTH_FALLBACK_ID)
+    AutoModelForDepthEstimation.from_pretrained(DEPTH_FALLBACK_ID)
 
 
 def fetch_lama() -> None:
@@ -97,8 +107,9 @@ def main() -> int:
     print("Pre-caching model weights into backend/models/ …")
     results = {
         "BiRefNet (matte)": _try("BiRefNet", fetch_birefnet),
-        "Depth Anything V3 (depth)": _try("Depth Anything V3", fetch_da3),
-        "Depth Anything V2 (depth fallback)": _try("Depth Anything V2", fetch_depth),
+        f"Depth — {DEPTH_MODEL_ID} (primary)": _try("Depth (primary)", fetch_depth),
+        "Depth Anything V2 (depth fallback)": _try("Depth Anything V2", fetch_depth_fallback),
+        "Depth Anything V3 (fast alt)": _try("Depth Anything V3", fetch_da3),
         "LaMa (inpaint)": _try("LaMa", fetch_lama),
         "SAM2 (object select)": _try("SAM2", fetch_sam2),
     }

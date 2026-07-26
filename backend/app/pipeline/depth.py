@@ -1,10 +1,13 @@
-"""Stage 4 — Depth. Depth Anything V2 → disparity, normalized to [0,1] where larger = nearer
-(so it sits naturally in `CoC = K·(disparity − disp_focus)`). Depth Anything's `predicted_depth`
-is already disparity-like (near = large), so it is used directly — no inversion.
+"""Stage 4 — Depth → disparity, normalized to [0,1] where larger = nearer (so it sits naturally in
+`CoC = K·(disparity − disp_focus)`).
 
-(The brief's first pick was Apple Depth Pro for boundary/hair-thin recall, but it was 60-130s
-and leaked MPS memory on a 16GB M4; depth here only grades the blur falloff, not the edge, so
-Depth Anything V2 is the practical choice — see runtime._load_depth.)
+Default model is **Apple Depth Pro** (the brief's first pick, §7.2/§7.4) for its boundary/hair-thin
+recall. Depth Pro outputs *metric* depth (meters), which `analyze()` inverts to disparity. It's
+heavy — on a 16GB Mac it's loaded fp16 and runs ~40-130s — but it runs **once per import** and the
+result is cached for every later slider edit, so the cost is paid on import, not per render. If
+memory is tight, `LENSY_DEPTH_MODEL=da3mono` (or a Depth-Anything-V2 id) swaps in a fast, light
+model; Depth Anything outputs disparity-like values directly (near = large), used without
+inversion. See runtime._load_depth.
 
 Fallback when no depth model is loaded: a smooth synthetic disparity from a center-weighted
 radial falloff blended with luminance — crude, but gives a believable "background falls away"
@@ -118,6 +121,11 @@ def _model_disparity(rgb_u8: np.ndarray, bundle: ModelBundle) -> np.ndarray:
     h, w = rgb_u8.shape[:2]
     processor = bundle.depth_transform
     inputs = processor(images=Image.fromarray(rgb_u8), return_tensors="pt").to(bundle.device)
+    # Depth Pro may be loaded in fp16 on MPS to fit memory — cast the pixel inputs to the model's
+    # dtype so the matmuls don't hit a float/half mismatch.
+    model_dtype = next(bundle.depth_model.parameters()).dtype
+    if inputs["pixel_values"].dtype != model_dtype:
+        inputs["pixel_values"] = inputs["pixel_values"].to(model_dtype)
     with torch.no_grad():
         out = bundle.depth_model(**inputs)
     post = processor.post_process_depth_estimation(out, target_sizes=[(h, w)])
