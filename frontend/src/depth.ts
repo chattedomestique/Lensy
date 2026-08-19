@@ -1,32 +1,39 @@
-// Client-side FOCUS-MAP editor, driven by four continuous sliders (no anchor tapping).
-// The subject (matte) is always in focus (white); everything nearer OR farther fades to black
-// (more blur). The four controls shape that falloff:
+// Client-side DEPTH editor — physical model.
 //
-//   amount    — width of the separation between the sharp subject and the blurred surround.
-//               Higher = a narrower in-focus band = more of the scene blurred (stronger pop).
-//   position  — slides the focal plane through depth; moves the sharp band toward the
-//               foreground or the background together.
-//   contrast  — a levels curve on the focus map: darks darker, lights lighter, so the split
-//               between in-focus and out-of-focus is crisper.
-//   falloff   — feathering of the blur gradient (a matte-excluding blur; subject stays crisp).
+// The depth map (from Depth Pro / Depth Anything) is GROUND TRUTH geometry and is what gets sent
+// to the renderer: near = 1, far = 0. Nothing here fabricates a "focus map" — focus is a *lens
+// parameter*, not a paint layer, so everything in the frame (the subject included) obeys
 //
-// Everything runs instantly at reduced resolution; the backend upscales. What's exported is a
-// depth map centered on the subject (subject = 0.5, nearer → 1, farther → 0) so the renderer's
-// |depth − focus| gives exactly the blur shown, with front/back preserved for occlusion.
+//     CoC = K · falloff(|depth − focus|)
+//
+// computed by the backend from this real depth. The controls map to real lens quantities:
+//
+//   position — the focal plane's location in depth (0.5 = the subject's own plane; tap-to-focus
+//              sets it from the tapped pixel's depth). Sent as `disp_focus`.
+//   range    — width of the in-focus zone (depth-of-field dead band). Sent as `focus_range`.
+//   falloff  — how abruptly blur ramps in past that zone. Sent as `focus_gamma`.
+//   smooth   — optional feathering of depth discontinuities (a mild blur of the exported map).
+//
+// Brush edits are DEPTH CORRECTIONS, not focus overrides: painting blends a region's depth toward
+// a target distance (the focal plane / farther / nearer) with a soft, hardness-controlled falloff.
+// The region then blurs (or doesn't) because of where it now *is*, exactly like a lens — move the
+// focal plane onto it later and it comes back into focus. No pure-black/white stamping.
 
-export interface DepthSettings {
-  amount: number; // 0..1 — width of fg/bg separation (higher = narrower in-focus band)
+export interface FocusSettings {
   position: number; // 0..1 — focal-plane position (0.5 = subject plane)
-  contrast: number; // 0..1 — levels/contrast on the focus map
-  falloff: number; // 0..1 — feathering of the blur gradient
+  range: number; // 0..1 — in-focus band width (→ backend focus_range 0..0.32)
+  falloff: number; // 0..1 — focus-falloff contrast (→ backend focus_gamma 0.45..2.2)
+  smooth: number; // 0..1 — feathering of depth discontinuities in the exported map
 }
 
-export const DEFAULT_SETTINGS: DepthSettings = {
-  amount: 0.5,
+export const DEFAULT_SETTINGS: FocusSettings = {
   position: 0.5,
-  contrast: 0,
-  falloff: 0.2,
+  range: 0.37, // ≈ the renderer's default focus_range of 0.12
+  falloff: 0.5, // gamma 1.0 — the plain physical ramp
+  smooth: 0,
 };
+
+export type DepthBrushMode = "focus" | "far" | "near" | "clear";
 
 const clampIdx = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -41,7 +48,7 @@ function loadImg(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function toGray(img: HTMLImageElement, w: number, h: number): Float32Array {
+function toGray(img: HTMLImageElement | HTMLCanvasElement, w: number, h: number): Float32Array {
   const c = document.createElement("canvas");
   c.width = w;
   c.height = h;
@@ -78,20 +85,35 @@ function boxBlur(src: Float32Array, w: number, h: number, r: number): Float32Arr
   return out;
 }
 
+function percentile(src: Float32Array, p: number): number {
+  const step = Math.max(1, Math.floor(src.length / 4096)); // sampled — plenty for a reference depth
+  const vals: number[] = [];
+  for (let i = 0; i < src.length; i += step) vals.push(src[i]);
+  vals.sort((a, b) => a - b);
+  return vals[clampIdx(Math.round(p * (vals.length - 1)), 0, vals.length - 1)];
+}
+
+// overlay tints per brush mode (matches the app accents)
+const MODE_TINT: Record<number, [number, number, number]> = {
+  1: [111, 182, 214], // focus — slate/cyan
+  2: [207, 138, 95], // far — terracotta
+  3: [168, 120, 200], // near — violet
+};
+
 export class DepthEditor {
   private w = 0;
   private h = 0;
-  private rawDepth: Float32Array = new Float32Array(); // near = 1
+  private rawDepth: Float32Array = new Float32Array(); // near = 1 (model output, real geometry)
   private matte: Float32Array = new Float32Array();
-  private focus: Float32Array = new Float32Array(); // 1 = in focus (white), 0 = max blur
-  private edited: Float32Array = new Float32Array(); // subject=0.5, near→1, far→0 (for backend)
-  private subjectDepth = 0.5; // auto median depth under the matte
-  // spot refinement: per-pixel local depth override painted by the Refine brush.
-  //   +1 = force in-focus (sharp) — kills foreground occlusion halos
-  //   -1 = force max blur (recede)
-  private refine: Int8Array = new Int8Array();
+  // depth-correction layer: per-pixel blend toward a painted target distance.
+  private editTarget: Float32Array = new Float32Array();
+  private editStrength: Float32Array = new Float32Array(); // 0 = untouched → 1 = fully re-assigned
+  private editMode: Uint8Array = new Uint8Array(); // 1 focus / 2 far / 3 near (for the overlay tint)
+  private subjectDepth = 0.5; // median depth under the matte — the autofocus plane
+  private farRef = 0.05; // the scene's far field (2nd percentile)
+  private nearRef = 0.95; // the scene's near field (98th percentile)
 
-  settings: DepthSettings = { ...DEFAULT_SETTINGS };
+  settings: FocusSettings = { ...DEFAULT_SETTINGS };
 
   get ready(): boolean {
     return this.w > 0;
@@ -102,11 +124,21 @@ export class DepthEditor {
   get height(): number {
     return this.h;
   }
-  get focalValue(): number {
-    return 0.5; // subject is mapped to the middle of the edited depth
+
+  /** The focal plane's depth value (near = 1), in the same space as the exported map. */
+  get focusValue(): number {
+    return clamp01(this.subjectDepth + (this.settings.position - 0.5) * 0.9);
   }
-  get hasRefine(): boolean {
-    for (let i = 0; i < this.refine.length; i++) if (this.refine[i]) return true;
+  /** Backend focus_range: width of the in-focus zone in normalized disparity. */
+  get focusRange(): number {
+    return 0.005 + this.settings.range * 0.315;
+  }
+  /** Backend focus_gamma: falloff 0 → 0.45 (blur ramps in early/gently), 1 → 2.2 (late/hard). */
+  get focusGamma(): number {
+    return Math.pow(2.2, (this.settings.falloff - 0.5) / 0.5);
+  }
+  get hasEdits(): boolean {
+    for (let i = 0; i < this.editStrength.length; i++) if (this.editStrength[i] > 0.01) return true;
     return false;
   }
 
@@ -117,111 +149,68 @@ export class DepthEditor {
     this.h = Math.max(1, Math.round(d.height * scale));
     this.rawDepth = toGray(d, this.w, this.h);
     this.matte = toGray(m, this.w, this.h);
-    this.focus = new Float32Array(this.w * this.h);
-    this.edited = new Float32Array(this.w * this.h);
-    this.refine = new Int8Array(this.w * this.h);
+    this.editTarget = new Float32Array(this.w * this.h);
+    this.editStrength = new Float32Array(this.w * this.h);
+    this.editMode = new Uint8Array(this.w * this.h);
     this.settings = { ...DEFAULT_SETTINGS };
-    // auto subject plane = median depth under the matte (fallback: mid of the range)
+    // subject plane = median depth under the matte (fallback: middle of the scene's range)
+    const vals: number[] = [];
+    for (let i = 0; i < this.w * this.h; i++) if (this.matte[i] > 0.5) vals.push(this.rawDepth[i]);
+    this.farRef = percentile(this.rawDepth, 0.02);
+    this.nearRef = Math.max(0.9, percentile(this.rawDepth, 0.98));
+    if (vals.length > 16) {
+      vals.sort((a, b) => a - b);
+      this.subjectDepth = vals[vals.length >> 1];
+    } else {
+      this.subjectDepth = (this.farRef + this.nearRef) / 2;
+    }
+  }
+
+  setSettings(s: FocusSettings): void {
+    this.settings = s;
+  }
+
+  /** Edited depth at a normalized point (small window average) — for tap-to-focus. */
+  depthAt(nx: number, ny: number): number {
+    const cx = clampIdx(Math.round(nx * this.w), 0, this.w - 1);
+    const cy = clampIdx(Math.round(ny * this.h), 0, this.h - 1);
+    const r = Math.max(2, Math.round(Math.max(this.w, this.h) * 0.008));
     let sum = 0;
     let cnt = 0;
-    let mn = 1;
-    let mx = 0;
-    for (let i = 0; i < this.w * this.h; i++) {
-      const dv = this.rawDepth[i];
-      if (dv < mn) mn = dv;
-      if (dv > mx) mx = dv;
-      if (this.matte[i] > 0.5) {
-        sum += dv;
+    for (let y = Math.max(0, cy - r); y <= Math.min(this.h - 1, cy + r); y++) {
+      for (let x = Math.max(0, cx - r); x <= Math.min(this.w - 1, cx + r); x++) {
+        sum += this.depthPx(y * this.w + x);
         cnt++;
       }
     }
-    this.subjectDepth = cnt > 0 ? sum / cnt : (mn + mx) / 2;
-    this.recompute();
+    return cnt ? sum / cnt : 0.5;
   }
 
-  setSettings(s: DepthSettings): void {
-    this.settings = s;
-    this.recompute();
+  /** The `position` slider value (0..1) that puts the focal plane at depth d — for tap-to-focus. */
+  positionForDepth(d: number): number {
+    return clamp01(0.5 + (clamp01(d) - this.subjectDepth) / 0.9);
   }
 
-  private recompute(): void {
-    const n = this.w * this.h;
-    const { amount, position, contrast, falloff } = this.settings;
-
-    // focal plane: position slides the sharp band through depth (0.5 = the subject's own plane)
-    const s = clamp01(this.subjectDepth + (position - 0.5) * 0.9);
-    // width of the in-focus band: more "amount" → narrower band → stronger separation
-    const width = 0.9 - amount * 0.78; // 0.9 (soft) → 0.12 (hard)
-    const cGain = 1 + contrast * 3; // levels curve steepness
-
-    // 1) background focus field (everything OUTSIDE the subject). Triangular falloff around s,
-    //    then a levels curve. Subject is forced white in step 3, so this never touches it.
-    const bgf = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      const d = this.rawDepth[i];
-      let v = 1 - Math.abs(d - s) / Math.max(width, 1e-3);
-      v = clamp01(v);
-      v = clamp01(0.5 + (v - 0.5) * cGain); // contrast: darks darker, lights lighter
-      bgf[i] = v;
-    }
-
-    // 2) falloff — feather the gradient with a matte-EXCLUDING blur so the subject's white can't
-    //    bleed into the surround; it only softens the foreground↔background transition.
-    if (falloff > 0.001) {
-      const r = Math.max(1, Math.round(falloff * Math.max(this.w, this.h) * 0.06));
-      const wmap = new Float32Array(n);
-      const wbgf = new Float32Array(n);
-      for (let i = 0; i < n; i++) {
-        const wt = 1 - this.matte[i];
-        wmap[i] = wt;
-        wbgf[i] = bgf[i] * wt;
-      }
-      const num = boxBlur(wbgf, this.w, this.h, r);
-      const den = boxBlur(wmap, this.w, this.h, r);
-      for (let i = 0; i < n; i++) {
-        bgf[i] = den[i] > 1e-3 ? num[i] / den[i] : bgf[i];
-      }
-    }
-
-    // 3) blend: subject (matte) always in focus (white); the rest uses the falloff field.
-    //    Export map centers the subject at 0.5, with near→1 / far→0 for occlusion ordering.
-    for (let i = 0; i < n; i++) {
-      const mt = this.matte[i];
-      const fo = clamp01(mt + (1 - mt) * bgf[i]);
-      this.focus[i] = fo;
-      const blur = 1 - fo;
-      this.edited[i] = this.rawDepth[i] >= s ? 0.5 + 0.5 * blur : 0.5 - 0.5 * blur;
-    }
-
-    // 4) spot refinement overrides (persist across slider edits). +1 → in focus (sharp);
-    //    -1 → max blur (keeps near/far side for occlusion); +2 → dissolve: force to a near-occluder
-    //    depth so the renderer scatters it as its own spreading soft-alpha layer (melts thin junk).
-    for (let i = 0; i < n; i++) {
-      if (this.refine[i] === 1) {
-        this.focus[i] = 1;
-        this.edited[i] = 0.5;
-      } else if (this.refine[i] === -1) {
-        this.focus[i] = 0;
-        this.edited[i] = this.rawDepth[i] >= s ? 1.0 : 0.0;
-      } else if (this.refine[i] === 2) {
-        this.focus[i] = 0;
-        this.edited[i] = 0.95; // near-occluder → foreground occluder layer spreads it away
-      }
-    }
+  private depthPx(i: number): number {
+    const s = this.editStrength[i];
+    return s > 0 ? this.rawDepth[i] * (1 - s) + this.editTarget[i] * s : this.rawDepth[i];
   }
 
-  /** Paint a spot refinement (disc). mode: sharpen (+1) / recede (-1) / dissolve (+2) / clear (0). */
-  paintRefine(
-    nx: number,
-    ny: number,
-    radiusFrac: number,
-    mode: "sharpen" | "recede" | "dissolve" | "clear",
-  ): void {
-    const val = mode === "sharpen" ? 1 : mode === "recede" ? -1 : mode === "dissolve" ? 2 : 0;
+  private targetFor(mode: DepthBrushMode): number {
+    if (mode === "focus") return this.focusValue; // assert: this thing sits at the focal plane
+    if (mode === "far") return this.farRef; // assert: it's actually in the far field
+    return this.nearRef; // "near": pull it to the near field (occluder melt)
+  }
+
+  /** Paint a soft depth correction. Hardness shapes the dab: 1 ≈ crisp edge, 0 = long feather.
+   * The dab writes blend STRENGTH toward the mode's target depth — never a hard 0/1 stamp. */
+  paintDepth(nx: number, ny: number, radiusFrac: number, hardness: number, mode: DepthBrushMode): void {
     const cx = nx * this.w;
     const cy = ny * this.h;
     const r = Math.max(2, radiusFrac * Math.max(this.w, this.h));
-    const r2 = r * r;
+    const feather = Math.max(0.12, 1 - clamp01(hardness)); // fraction of the radius that ramps
+    const target = mode === "clear" ? 0 : this.targetFor(mode);
+    const modeId = mode === "focus" ? 1 : mode === "far" ? 2 : mode === "near" ? 3 : 0;
     const x0 = Math.max(0, Math.floor(cx - r));
     const x1 = Math.min(this.w - 1, Math.ceil(cx + r));
     const y0 = Math.max(0, Math.floor(cy - r));
@@ -230,59 +219,93 @@ export class DepthEditor {
       for (let x = x0; x <= x1; x++) {
         const dx = x - cx;
         const dy = y - cy;
-        if (dx * dx + dy * dy <= r2) this.refine[y * this.w + x] = val as number;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > r) continue;
+        // soft radial falloff: full strength in the core, smoothstep ramp across the feather band
+        let t = (1 - dist / r) / feather;
+        t = clamp01(t);
+        const a = t * t * (3 - 2 * t);
+        if (a <= 0) continue;
+        const i = y * this.w + x;
+        if (mode === "clear") {
+          this.editStrength[i] *= 1 - a;
+          if (this.editStrength[i] < 0.01) this.editMode[i] = 0;
+          continue;
+        }
+        if (a >= this.editStrength[i]) {
+          this.editTarget[i] = target;
+          this.editMode[i] = modeId;
+          this.editStrength[i] = a;
+        }
       }
     }
-    // no recompute here — the brush repaints many times per stroke; call commit() on finger-lift
   }
 
-  /** Recompute the maps after a refinement stroke (call once when the brush lifts). */
-  commit(): void {
-    this.recompute();
+  /** Apply a selection mask (e.g. SAM2, white = selected) as a feathered depth correction — the
+   * "tap an object → put it at a distance" path. The mask edge is feathered so the corrected
+   * region blends into the surrounding geometry instead of stamping a hard depth cliff. */
+  applyMaskDepth(mask: HTMLImageElement, mode: DepthBrushMode): void {
+    if (!this.ready) return;
+    const sel = toGray(mask, this.w, this.h);
+    const r = Math.max(1, Math.round(Math.max(this.w, this.h) * 0.006));
+    const soft = boxBlur(sel, this.w, this.h, r);
+    const target = mode === "clear" ? 0 : this.targetFor(mode);
+    const modeId = mode === "focus" ? 1 : mode === "far" ? 2 : mode === "near" ? 3 : 0;
+    for (let i = 0; i < this.w * this.h; i++) {
+      const a = clamp01(soft[i]);
+      if (a <= 0.02) continue;
+      if (mode === "clear") {
+        this.editStrength[i] *= 1 - a;
+        if (this.editStrength[i] < 0.01) this.editMode[i] = 0;
+      } else if (a >= this.editStrength[i]) {
+        this.editTarget[i] = target;
+        this.editMode[i] = modeId;
+        this.editStrength[i] = a;
+      }
+    }
   }
 
-  clearRefine(): void {
-    if (!this.hasRefine) return;
-    this.refine.fill(0);
-    this.recompute();
+  clearEdits(): void {
+    if (!this.hasEdits) return;
+    this.editStrength.fill(0);
+    this.editMode.fill(0);
   }
 
-  /** Tint the painted refinement regions over the photo (cyan = sharpen, warm = recede). */
-  drawRefineOverlay(canvas: HTMLCanvasElement): void {
+  /** Tint the painted corrections over the photo, alpha-weighted by their strength. */
+  drawEditOverlay(canvas: HTMLCanvasElement): void {
     canvas.width = this.w;
     canvas.height = this.h;
     const ctx = canvas.getContext("2d")!;
     const img = ctx.createImageData(this.w, this.h);
     for (let i = 0; i < this.w * this.h; i++) {
-      const v = this.refine[i];
-      if (v === 1) {
-        img.data[i * 4] = 111;
-        img.data[i * 4 + 1] = 182;
-        img.data[i * 4 + 2] = 214; // --accent-2 slate/cyan
-        img.data[i * 4 + 3] = 120;
-      } else if (v === -1) {
-        img.data[i * 4] = 207;
-        img.data[i * 4 + 1] = 138;
-        img.data[i * 4 + 2] = 95; // --accent terracotta
-        img.data[i * 4 + 3] = 120;
-      } else if (v === 2) {
-        img.data[i * 4] = 168;
-        img.data[i * 4 + 1] = 120;
-        img.data[i * 4 + 2] = 200; // violet = dissolve
-        img.data[i * 4 + 3] = 120;
-      }
+      const s = this.editStrength[i];
+      const tint = MODE_TINT[this.editMode[i]];
+      if (s < 0.02 || !tint) continue;
+      img.data[i * 4] = tint[0];
+      img.data[i * 4 + 1] = tint[1];
+      img.data[i * 4 + 2] = tint[2];
+      img.data[i * 4 + 3] = Math.round(40 + 110 * s);
     }
     ctx.putImageData(img, 0, 0);
   }
 
-  /** Paint the focus map (white = in focus) for the live Depth preview. */
+  /** Live focus preview: the PREDICTED sharpness field, from the same CoC model the renderer
+   * uses — white = in focus, darker = more blur, with real gradients (never a binary stamp).
+   * The subject is NOT forced white: move the focal plane off it and it visibly defocuses. */
   drawFocus(canvas: HTMLCanvasElement): void {
     canvas.width = this.w;
     canvas.height = this.h;
     const ctx = canvas.getContext("2d")!;
     const img = ctx.createImageData(this.w, this.h);
+    const f = this.focusValue;
+    const range = this.focusRange;
+    const gamma = this.focusGamma;
+    const norm = Math.max(f, 1 - f, 1e-3);
     for (let i = 0; i < this.w * this.h; i++) {
-      const v = (this.focus[i] * 255 + 0.5) | 0;
+      const d = this.depthPx(i);
+      const eff = clamp01((Math.abs(d - f) - range) / norm);
+      const coc = Math.pow(eff, gamma); // mirror of blur.focal_radius (non-metric path)
+      const v = (255 * (1 - coc) + 0.5) | 0;
       img.data[i * 4] = v;
       img.data[i * 4 + 1] = v;
       img.data[i * 4 + 2] = v;
@@ -291,14 +314,23 @@ export class DepthEditor {
     ctx.putImageData(img, 0, 0);
   }
 
+  /** Export the REAL (edited) depth map for the renderer: near = 1, far = 0. Optional `smooth`
+   * feathers depth discontinuities with a mild blur — geometry averaging, not focus painting. */
   async exportDepthPng(): Promise<Blob> {
+    const n = this.w * this.h;
+    let depth: Float32Array = new Float32Array(n);
+    for (let i = 0; i < n; i++) depth[i] = this.depthPx(i);
+    if (this.settings.smooth > 0.01) {
+      const r = Math.max(1, Math.round(this.settings.smooth * Math.max(this.w, this.h) * 0.02));
+      depth = boxBlur(depth, this.w, this.h, r);
+    }
     const c = document.createElement("canvas");
     c.width = this.w;
     c.height = this.h;
     const ctx = c.getContext("2d")!;
     const img = ctx.createImageData(this.w, this.h);
-    for (let i = 0; i < this.w * this.h; i++) {
-      const v = (this.edited[i] * 255 + 0.5) | 0;
+    for (let i = 0; i < n; i++) {
+      const v = (clamp01(depth[i]) * 255 + 0.5) | 0;
       img.data[i * 4] = v;
       img.data[i * 4 + 1] = v;
       img.data[i * 4 + 2] = v;

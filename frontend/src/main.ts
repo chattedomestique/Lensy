@@ -55,13 +55,13 @@ appver.textContent = `v${__APP_VERSION__}·${__BUILD_ID__}`;
 
 // ---- editable state (all values live in 0..100 UI units) ----
 type Key =
-  | "amount" | "position" | "contrast" | "falloff"       // depth (client-side)
-  | "k" | "highlight" | "halation" | "halationSize"       // lens (backend)
+  | "focusPos" | "focusRange" | "focusFalloff" | "focusSmooth" // focus = real lens params
+  | "k" | "highlight" | "halation" | "halationSize"            // lens (backend)
   | "ca" | "swirl" | "sweet" | "sweetSize" | "distortion"
   | "grain" | "grainSize" | "grainBlend";
 
 const DEFAULTS: Record<Key, number> = {
-  amount: 50, position: 50, contrast: 0, falloff: 20,
+  focusPos: 50, focusRange: 37, focusFalloff: 50, focusSmooth: 0,
   k: 60, highlight: 0, halation: 0, halationSize: 40,
   ca: 0, swirl: 0, sweet: 0, sweetSize: 35, distortion: 0,
   grain: 0, grainSize: 40, grainBlend: 0,
@@ -89,12 +89,12 @@ interface Tool {
 
 const TOOLS: Tool[] = [
   {
-    id: "depth", label: "Depth",
+    id: "depth", label: "Focus",
     params: [
-      { key: "amount", label: "Depth amount" },
-      { key: "position", label: "Depth position" },
-      { key: "contrast", label: "Depth contrast" },
-      { key: "falloff", label: "Depth falloff" },
+      { key: "focusPos", label: "Focus" },
+      { key: "focusRange", label: "Focus range" },
+      { key: "focusFalloff", label: "Falloff" },
+      { key: "focusSmooth", label: "Smooth" },
     ],
   },
   { id: "subject", label: "Subject", params: [], subject: true },
@@ -133,13 +133,14 @@ const TOOLS: Tool[] = [
   { id: "refine", label: "Refine", params: [], refine: true },
   { id: "erase", label: "Erase", params: [], erase: true },
 ];
-let refineMode: "sharpen" | "recede" | "dissolve" = "sharpen";
+let refineMode: "focus" | "far" | "near" | "clear" = "focus";
 let eraseTarget: "auto" | "subject" | "background" = "auto";
+let subjectMode: "auto" | "person" | "object" = "auto"; // what a Subject tap means
 let brushSize = 4; // % of the long edge
 let brushHardness = 0.5; // 0 soft → 1 hard
 
 let activeTool = TOOLS[0];
-let activeKey: Key = "amount";
+let activeKey: Key = "focusPos";
 
 // ---- runtime ----
 const editor = new DepthEditor();
@@ -306,7 +307,7 @@ function enterRefineMode(): void {
   // brush on the rendered photo so the halo is visible; overlay shows what's painted
   resultImg.classList.remove("hidden");
   depthView.classList.add("hidden");
-  editor.drawRefineOverlay(eraseLayer);
+  editor.drawEditOverlay(eraseLayer);
   eraseLayer.classList.remove("hidden");
 }
 
@@ -333,9 +334,31 @@ function buildSubrow(): void {
     return;
   }
   if (activeTool.subject) {
+    // what a tap means: Auto guesses; People keeps BiRefNet's hair-grade matte; Objects builds the
+    // matte from the SAM2 selection (BiRefNet ignores non-salient things like mugs/plants/bikes).
+    const modes: [typeof subjectMode, string][] = [
+      ["auto", "Auto"],
+      ["person", "People"],
+      ["object", "Objects"],
+    ];
+    for (const [m, label] of modes) {
+      const chip = document.createElement("button");
+      chip.className = "chip";
+      chip.textContent = label;
+      chip.dataset.smode = m;
+      chip.setAttribute("aria-pressed", String(m === subjectMode));
+      chip.addEventListener("click", () => {
+        subjectMode = m;
+        subrow.querySelectorAll<HTMLButtonElement>(".chip[data-smode]").forEach((c) =>
+          c.setAttribute("aria-pressed", String(c.dataset.smode === m)),
+        );
+        updateOverlayLabel();
+      });
+      subrow.appendChild(chip);
+    }
     const reset = document.createElement("button");
     reset.className = "chip";
-    reset.textContent = "Reset to auto";
+    reset.textContent = "Reset";
     reset.style.marginLeft = "auto";
     reset.addEventListener("click", () => void resetSubject());
     subrow.appendChild(reset);
@@ -392,12 +415,14 @@ function updateOverlayLabel(): void {
   }
   if (activeTool.refine) {
     toolLabel.textContent = "Refine";
-    toolHint.textContent = "brush over a halo or bad edge to fix it";
+    toolHint.textContent = "brush or tap a thing to set its distance";
     return;
   }
   if (activeTool.subject) {
     toolLabel.textContent = "Subject";
-    toolHint.textContent = "tap each person you want in focus";
+    toolHint.textContent =
+      subjectMode === "object" ? "tap each object you want as the subject"
+      : "tap each person you want as the subject";
     return;
   }
   const p = activeTool.params.find((x) => x.key === activeKey)!;
@@ -538,9 +563,10 @@ function bindDrag(): void {
     }
 
     if (activeTool.refine) {
-      const { nx, ny } = normOf(e); // paint even on a tap-dab, then commit on lift
-      editor.paintRefine(nx, ny, brushFrac(), refineMode);
-      editor.drawRefineOverlay(eraseLayer);
+      if (!moved) return; // a drag = brush; a still tap = SAM2 object select (on pointerup)
+      const { nx, ny } = normOf(e);
+      editor.paintDepth(nx, ny, brushFrac(), brushHardness, refineMode);
+      editor.drawEditOverlay(eraseLayer);
       strokePainted = true;
       return;
     }
@@ -590,14 +616,25 @@ function bindDrag(): void {
     }
     if (activeTool.refine) {
       if (!strokePainted) {
-        const { nx, ny } = normOf(e); // a tap paints one dab
-        editor.paintRefine(nx, ny, brushFrac(), refineMode);
-        editor.drawRefineOverlay(eraseLayer);
+        // a still tap = SAM2-select the object under the finger and set ITS distance (feathered)
+        if (resultImg.getBoundingClientRect().width > 4) void tapRefine(normOf(e));
+      } else {
+        scheduleRender(); // brushed a correction → re-render with the corrected depth
       }
-      editor.commit(); // recompute once, then render with the refined depth
-      scheduleRender();
       moved = false;
       strokePainted = false;
+      return;
+    }
+    if (activeTool.id === "depth" && !moved) {
+      // tap-to-focus: put the focal plane at the tapped thing's depth — the lens way to focus
+      if (editor.ready && resultImg.getBoundingClientRect().width > 4) {
+        const { nx, ny } = normOf(e);
+        state.focusPos = editor.positionForDepth(editor.depthAt(nx, ny)) * 100;
+        editor.setSettings(depthSettings());
+        if (activeKey === "focusPos") setTicker(state.focusPos);
+        showDepthLive();
+        scheduleRender();
+      }
       return;
     }
     if (moved) scheduleRender();
@@ -640,10 +677,14 @@ function buildEraseActions(): void {
 }
 
 function buildRefineActions(): void {
+  // depth-correction brushes: each assigns the painted region a real DISTANCE (the focal plane /
+  // the far field / the near field), so its blur then follows the lens like everything else —
+  // move the focal plane onto it later and it comes back into focus.
   const modes: [typeof refineMode, string][] = [
-    ["sharpen", "Sharpen"],
-    ["recede", "Blur"],
-    ["dissolve", "Dissolve"],
+    ["focus", "To focus"],
+    ["far", "Farther"],
+    ["near", "Nearer"],
+    ["clear", "Erase"],
   ];
   for (const [m, label] of modes) {
     const chip = document.createElement("button");
@@ -661,11 +702,11 @@ function buildRefineActions(): void {
   }
   const clear = document.createElement("button");
   clear.className = "chip";
-  clear.textContent = "Clear";
+  clear.textContent = "Clear all";
   clear.style.marginLeft = "auto";
   clear.addEventListener("click", () => {
-    editor.clearRefine();
-    editor.drawRefineOverlay(eraseLayer);
+    editor.clearEdits();
+    editor.drawEditOverlay(eraseLayer);
     scheduleRender();
   });
   subrow.appendChild(clear);
@@ -676,7 +717,7 @@ async function applySubject(points: [number, number, number][], reset: boolean):
   inflight?.cancel();
   setProgress(reset ? "Resetting…" : "Selecting subject…");
   try {
-    await selectSubject(analyzeId, points, reset);
+    await selectSubject(analyzeId, points, reset, subjectMode);
     dataVersion++;
     // matte changed → reload it so the depth editor re-centres focus on the new subject
     await editor.load(depthUrl(analyzeId, dataVersion), matteUrl(analyzeId, dataVersion));
@@ -698,6 +739,23 @@ async function tapSelect(p: { nx: number; ny: number }): Promise<void> {
   try {
     const img = await segment(analyzeId, [[p.nx, p.ny, 1]]);
     eraseSel.addMaskImage(img);
+  } catch (err) {
+    toast(err instanceof ApiError ? err.message : "Couldn't select that.");
+  } finally {
+    setProgress("", false);
+  }
+}
+
+// Refine tap: SAM2-select the object under the finger and assign it the active mode's DISTANCE
+// (to-focus / farther / nearer) as a feathered depth correction — its blur then follows the lens.
+async function tapRefine(p: { nx: number; ny: number }): Promise<void> {
+  if (!analyzeId) return;
+  setProgress("Selecting…");
+  try {
+    const img = await segment(analyzeId, [[p.nx, p.ny, 1]]);
+    editor.applyMaskDepth(img, refineMode);
+    editor.drawEditOverlay(eraseLayer);
+    scheduleRender();
   } catch (err) {
     toast(err instanceof ApiError ? err.message : "Couldn't select that.");
   } finally {
@@ -762,19 +820,22 @@ async function undoErase(): Promise<void> {
 // ---- params ----
 function depthSettings() {
   return {
-    amount: state.amount / 100,
-    position: state.position / 100,
-    contrast: state.contrast / 100,
-    falloff: state.falloff / 100,
+    position: state.focusPos / 100,
+    range: state.focusRange / 100,
+    falloff: state.focusFalloff / 100,
+    smooth: state.focusSmooth / 100,
   };
 }
 
 function renderParams(): RenderParams {
   return {
     k: state.k,
-    disp_focus: editor.focalValue,
+    // real lens parameters — the renderer computes CoC from these + the REAL depth map, for the
+    // background AND the subject alike (nothing is exempt from the focal plane).
+    disp_focus: editor.focusValue,
     autofocus: false,
-    subject_dof: false,
+    focus_range: editor.focusRange,
+    focus_gamma: editor.focusGamma,
     blades,
     highlight_boost: backendVal("highlight"),
     cat_eye: 0.2,
