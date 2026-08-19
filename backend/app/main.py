@@ -24,6 +24,11 @@ logging.basicConfig(
     format="%(asctime)s  %(name)-16s %(levelname)-7s %(message)s",
     datefmt="%H:%M:%S",
 )
+# The HF hub client logs an INFO line per HEAD request — ~40 lines every startup, which drowns
+# our own messages and (worse) buries a real error under a wall of cache-revalidation noise.
+# We only care about these when they fail.
+for _noisy in ("httpx", "httpcore", "huggingface_hub.utils._http"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 log = logging.getLogger("lensy")
 
 
