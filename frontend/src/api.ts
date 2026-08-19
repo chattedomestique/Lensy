@@ -8,7 +8,8 @@ export interface RenderParams {
   k: number; // 0..100 blur strength
   disp_focus: number; // 0..1 focal plane (used only when autofocus is false)
   autofocus: boolean; // lock focus to the subject
-  subject_dof: boolean; // cinematic (blur subject by depth) vs sharp cutout
+  focus_range: number; // in-focus zone half-width (normalized disparity)
+  focus_gamma: number; // focus-falloff curve: how abruptly blur ramps past the range
   blades: number; // 0 = circular, else N-gon
   highlight_boost: number; // 0..2 bloom strength
   cat_eye: number; // 0..1
@@ -118,17 +119,20 @@ export async function segment(
   return img;
 }
 
-/** Restrict the subject to the tapped person(s) (SAM2), or reset to the automatic matte.
- * points: [[nx, ny, label]] normalized 0..1. Each call adds a person to the subject. */
+/** Restrict the subject to the tapped person(s)/object(s) (SAM2), or reset to the automatic matte.
+ * points: [[nx, ny, label]] normalized 0..1. Each call adds to the subject. `mode` picks how taps
+ * become a matte: "person" = BiRefNet hair-grade, "object" = SAM2 selection, "auto" = guess. */
 export async function selectSubject(
   analyzeId: string,
   points: [number, number, number][],
   reset = false,
+  mode: "auto" | "person" | "object" = "auto",
 ): Promise<void> {
   const form = new FormData();
   form.append("analyze_id", analyzeId);
   form.append("points", JSON.stringify(points));
   form.append("reset", String(reset));
+  form.append("mode", mode);
   const r = await fetch(apiUrl("/subject"), { method: "POST", body: form });
   if (!r.ok) {
     const b = await r.json().catch(() => ({}));
@@ -175,7 +179,8 @@ function appendParams(form: FormData, params: RenderParams): void {
   form.append("k", String(params.k));
   form.append("disp_focus", String(params.disp_focus));
   form.append("autofocus", String(params.autofocus));
-  form.append("subject_dof", String(params.subject_dof));
+  form.append("focus_range", String(params.focus_range));
+  form.append("focus_gamma", String(params.focus_gamma));
   form.append("blades", String(params.blades));
   form.append("highlight_boost", String(params.highlight_boost));
   form.append("cat_eye", String(params.cat_eye));

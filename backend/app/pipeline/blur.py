@@ -36,7 +36,8 @@ class BlurParams:
     cat_eye: float = 0.2       # optical vignetting toward edges (0 = off)
     n_bins: int = 10           # CoC quantization layers (legacy scatter path)
     focus_range: float = 0.12  # half-width (diopters, or normalized disparity) of the in-focus zone
-    subject_dof: bool = False  # (cinematic removed) subject composited sharp
+    focus_gamma: float = 1.0   # CoC ramp curve past the in-focus zone: <1 blur arrives sooner/gentler,
+                               # >1 stays sharp longer then blurs harder (a focus-falloff contrast)
     n_layers: int = 22         # depth slices for the layered occlusion renderer
     chroma: float = 0.0        # lateral chromatic aberration in the bokeh (0 = off; ~0.01 subtle)
     swirl: float = 0.0         # Petzval swirly bokeh — tangential smear growing toward the edges
@@ -152,7 +153,13 @@ def focal_radius(signal: np.ndarray, focus: float, metric: bool, p: BlurParams) 
         eff = np.clip((diff - float(p.focus_range)) / norm, 0.0, 1.0)
         radius = eff * max_radius
 
-    return np.minimum(radius, max_radius).astype(np.float32)
+    radius = np.minimum(radius, max_radius)
+    # focus_gamma shapes HOW blur ramps in past the dead zone (a focus-falloff contrast). Applied on
+    # the normalized radius so the ceiling is unchanged and both depth models share one curve.
+    g = float(p.focus_gamma)
+    if abs(g - 1.0) > 1e-3:
+        radius = max_radius * np.power(radius / max_radius, np.clip(g, 0.3, 3.0))
+    return radius.astype(np.float32)
 
 
 def scatter_dof(

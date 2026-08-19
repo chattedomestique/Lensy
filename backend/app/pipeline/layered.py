@@ -511,11 +511,16 @@ def render_layered_dof(
     # character effects (bloom / halation / chroma / grain). The depth signal is untouched, so the
     # depth-driven tools still work — this is "blur off, depth kept".
     bg_radius = focal_radius(bg_signal, focus, metric, p)
-    subject_sharp = not p.subject_dof
-    fg_radius = None if subject_sharp else focal_radius(fg_signal, focus, metric, p)
+    fg_radius = focal_radius(fg_signal, focus, metric, p)
+    # The subject obeys the SAME lens physics as everything else: its per-pixel CoC from its own
+    # depth. It is composited sharp only when its CoC actually rounds to zero (the focal plane is
+    # on it — the autofocus default); once the focal plane moves off the subject, the subject
+    # defocuses like any object at its distance. No "always in focus" override — that isn't a lens.
+    sub = a_sub > 0.5
+    subject_sharp = float(fg_radius[sub].max()) < 1.0 if bool(sub.any()) else True
     blur_off = (
         float(bg_radius.max()) < 0.5
-        and (fg_radius is None or float(fg_radius.max()) < 0.5)
+        and (subject_sharp or float(fg_radius[sub].max()) < 0.5)
         and p.swirl <= 0
         and p.sweet <= 0
     )
@@ -573,9 +578,10 @@ def render_layered_dof(
 
     # --- foreground sheet (subject) ---
     fg_lin = srgb_to_linear(np.clip(fg_srgb, 0.0, 1.0))
-    if p.subject_dof:
-        # cinematic: the subject gets the same layered DoF (off-focal parts soften, occlusion-correct)
-        fg_radius = focal_radius(fg_signal, focus, metric, p)
+    if not subject_sharp:
+        # the subject is off the focal plane → the same layered DoF as the background: each part
+        # softens by ITS circle of confusion, occlusion-correct. Physically it must — a person two
+        # meters past the plane is exactly as defocused as a lamp two meters past it.
         fg_coord = _layer_coord(fg_signal, metric)
         fgc, fga, _ = render_sheet(fg_lin, np.clip(alpha, 0.0, 1.0), fg_coord, fg_radius, p, None)
     else:

@@ -67,6 +67,7 @@ class Analysis:
     icc: bytes | None = None            # source ICC profile (e.g. Display P3), carried to output
     matte_full: np.ndarray | None = None   # the auto (BiRefNet) matte before subject restriction
     subject_sel: np.ndarray | None = None  # union of tapped SAM2 subject masks (None = auto matte)
+    subject_mode: str = "auto"             # "auto" | "person" | "object" — how taps become the matte
     undo_stack: list = field(default_factory=list)  # pre-erase snapshots, for undoing a processed erase
     created: float = field(default_factory=time.time)
 
@@ -221,10 +222,12 @@ async def select_subject(
     analyze_id: str = Form(...),
     points: str = Form("[]"),   # JSON [[nx, ny, label], …]; each tap adds a person to the subject
     reset: bool = Form(False),  # clear back to the automatic (whole-scene) matte
+    mode: str = Form("auto"),   # "auto" | "person" | "object" — see segment.restrict_matte
 ) -> JSONResponse:
-    """Restrict the subject to who you tap: SAM2-select that person and keep the soft matte only
-    there, so other salient people (at a different depth) fall back to the blurred background and
-    the focal plane locks to the tapped subject. Tap again to add same-plane subjects."""
+    """Restrict the subject to what you tap: SAM2-select it and keep the soft matte only there, so
+    other salient subjects (at a different depth) fall back to the blurred background and the focal
+    plane locks to the tapped subject. Tap again to add same-plane subjects. `mode` picks whether
+    taps mean people (BiRefNet hair-grade matte) or objects (SAM2 selection matte)."""
     bundle = getattr(request.app.state, "bundle", None)
     if bundle is None:
         return _friendly(503, "warming", "Models are still loading — try again in a moment.")
@@ -253,7 +256,8 @@ async def select_subject(
     loop = asyncio.get_running_loop()
     sel = await loop.run_in_executor(None, segment_at, a.work, points_xy, labels, None, bundle)
     a.subject_sel = sel if a.subject_sel is None else np.maximum(a.subject_sel, sel)
-    a.alpha = restrict_matte(a.matte_full, a.subject_sel)
+    a.subject_mode = mode if mode in ("auto", "person", "object") else "auto"
+    a.alpha = restrict_matte(a.matte_full, a.subject_sel, a.subject_mode)
     a.fg = a.clean_bg = None  # matte changed → decontaminate + inpaint must recompute
     return JSONResponse({"ok": True, "width": w, "height": h})
 
@@ -339,7 +343,7 @@ async def erase_object(
     _push_undo(a)  # snapshot the pre-erase scene so this processed erase can be undone
     a.work, a.depth = cleaned, depth
     a.matte_full = alpha
-    a.alpha = restrict_matte(alpha, a.subject_sel) if a.subject_sel is not None else alpha
+    a.alpha = restrict_matte(alpha, a.subject_sel, a.subject_mode) if a.subject_sel is not None else alpha
     a.fg = None  # invalidate the precompose cache — the scene changed
     a.clean_bg = None
     a.orig = None  # the full-res original no longer matches the erased working image → render at work res
@@ -367,15 +371,16 @@ async def undo_erase(
 
 
 def _params_from_form(
-    k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
-    swirl, sweet, sweet_size, halation, halation_size, ca, distortion, grain, grain_size,
-    grain_blend, working_res,
+    k, disp_focus, autofocus, focus_range, focus_gamma, blades, rotation, highlight_boost,
+    cat_eye, swirl, sweet, sweet_size, halation, halation_size, ca, distortion, grain,
+    grain_size, grain_blend, working_res,
 ) -> RenderParams:
     return RenderParams(
         k=float(np.clip(k, 0, 100)),
         disp_focus=float(np.clip(disp_focus, 0, 1)),
         autofocus=bool(autofocus),
-        subject_dof=bool(subject_dof),
+        focus_range=float(np.clip(focus_range, 0.0, 0.5)),
+        focus_gamma=float(np.clip(focus_gamma, 0.3, 3.0)),
         blades=int(blades),
         rotation=float(rotation),
         highlight_boost=float(np.clip(highlight_boost, 0, 2)),
@@ -435,7 +440,9 @@ async def start_render(
     k: float = Form(60.0),
     disp_focus: float = Form(0.7),
     autofocus: bool = Form(True),
-    subject_dof: bool = Form(False),
+    focus_range: float = Form(0.12),
+    focus_gamma: float = Form(1.0),
+    subject_dof: bool = Form(False),  # deprecated & ignored — the subject always obeys its CoC now
     blades: int = Form(0),
     rotation: float = Form(0.0),
     highlight_boost: float = Form(0.18),
@@ -455,10 +462,11 @@ async def start_render(
     bundle = getattr(request.app.state, "bundle", None)
     if bundle is None:
         return _friendly(503, "warming", "Models are still loading — try again in a moment.")
+    del subject_dof  # accepted for old clients, no longer meaningful (physics decides)
     params = _params_from_form(
-        k, disp_focus, autofocus, subject_dof, blades, rotation, highlight_boost, cat_eye,
-        swirl, sweet, sweet_size, halation, halation_size, ca, distortion, grain, grain_size,
-        grain_blend, working_res,
+        k, disp_focus, autofocus, focus_range, focus_gamma, blades, rotation, highlight_boost,
+        cat_eye, swirl, sweet, sweet_size, halation, halation_size, ca, distortion, grain,
+        grain_size, grain_blend, working_res,
     )
     if analyze_id:  # grain is static per image: seed from the analysis id, not per render
         params.grain_seed = (int(analyze_id[:8], 16) % 9973) / 9973.0

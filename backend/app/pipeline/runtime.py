@@ -155,36 +155,53 @@ def _load_birefnet(device: str):
     return model, None  # BiRefNet preprocessing is simple; done inline in matte.py
 
 
-# Depth model. Default **Depth Anything V3 mono-Large** (~1.5s) — same size class as V2-Large but
-# richer, more continuous depth (predicts true depth, not disparity), so the blur falloff grades
-# more convincingly. Options via LENSY_DEPTH_MODEL:
-#   da3mono                                     (Depth Anything V3 mono-Large — default)
+# Depth model. Default **Apple Depth Pro** (apple/DepthPro-hf) — the brief's first pick (§7.2/§7.4),
+# chosen for best-in-class boundary accuracy + thin-structure (hair/fur) recall, which is exactly
+# what protects the edge (§7.1). It outputs *metric* depth and is heavy (~1.9GB weights, 1536²
+# inference), so on Apple Silicon it's loaded in **fp16** (LENSY_DEPTH_FP16, on by default for MPS)
+# to fit a 16GB Mac, and it runs **once per import** — the result is cached for every later slider
+# edit, so the ~40-130s cost is paid on import, not per render. If it can't load, Lensy falls back
+# to Depth-Anything-V2-Large automatically. Options via LENSY_DEPTH_MODEL:
+#   apple/DepthPro-hf                           (metric, richest edges/hair — default)
+#   da3mono                                     (Depth Anything V3 mono-Large, ~1.5s — fast + light)
 #   depth-anything/Depth-Anything-V2-Large-hf   (~1.5s, transformers-native; the reliable fallback)
 #   depth-anything/Depth-Anything-V2-Base-hf    (~0.4s, fastest)
-#   apple/DepthPro-hf                            (~40-80s, richest metric depth, memory-heavy)
-_DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "da3mono")
+_DEPTH_MODEL_ID = os.environ.get("LENSY_DEPTH_MODEL", "apple/DepthPro-hf")
 _DEPTH_FALLBACK_ID = "depth-anything/Depth-Anything-V2-Large-hf"
 _DA3_MODEL_ID = os.environ.get("LENSY_DA3_MODEL", "depth-anything/da3mono-large")
+# Load Depth Pro in half precision on MPS: ~halves resident + peak memory so it fits a 16GB Mac.
+# Set LENSY_DEPTH_FP16=0 to force fp32 (more memory, marginally more precise).
+_DEPTH_FP16 = os.environ.get("LENSY_DEPTH_FP16", "1").lower() not in ("0", "false", "no", "")
 
 
 def _load_depth(device: str, model_id: str | None = None):
     """Load a transformers depth model + processor. Depth Pro needs its own classes and outputs
     *metric* depth (meters → invert for disparity); Depth Anything V2 outputs disparity-like values
-    directly. load_bundle() sets `depth_metric` from the model id."""
-    import torch
+    directly. load_bundle() sets `depth_metric` from the model id.
+
+    Depth Pro is loaded in **fp16 on MPS** (LENSY_DEPTH_FP16): it's a ~1.9GB model with a large
+    1536² activation peak, and half precision ~halves both resident and peak memory so it fits a
+    16GB Mac alongside BiRefNet/SAM2. Apple's own Depth Pro runs fp16, and the precision is plenty
+    here (we normalize to [0,1] disparity for the editor). Everything else stays fp32; depth.py
+    casts the inputs to match the model's dtype."""
+    import torch  # noqa: F401  (imported so a torch-less env fails here → graceful fallback)
 
     model_id = model_id or _DEPTH_MODEL_ID
-    if "depthpro" in model_id.lower():
+    is_depthpro = "depthpro" in model_id.lower()
+    if is_depthpro:
         from transformers import DepthProForDepthEstimation, DepthProImageProcessor
 
         processor = DepthProImageProcessor.from_pretrained(model_id)
-        model = DepthProForDepthEstimation.from_pretrained(model_id, dtype=torch.float32)
+        model = DepthProForDepthEstimation.from_pretrained(model_id)
     else:
         from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
         processor = AutoImageProcessor.from_pretrained(model_id)
         model = AutoModelForDepthEstimation.from_pretrained(model_id)
-    model.to(device).float().eval()
+    if is_depthpro and device == "mps" and _DEPTH_FP16:
+        model.half().to(device).eval()  # halve on CPU first → no fp32 spike on the device
+    else:
+        model.to(device).float().eval()
     return model, processor
 
 

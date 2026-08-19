@@ -112,6 +112,49 @@ def test_grain_blend_confines_to_defocus():
     assert rms(defocus_only, ~blob) > 3.0
 
 
+def test_subject_obeys_focal_plane():
+    """The subject follows the SAME lens physics as everything else. Focus on the subject → it is
+    sharp and the background blurs. Move the focal plane onto the background → the subject
+    defocuses by its circle of confusion and the background is sharp. No 'always in focus' pin."""
+    import cv2
+
+    from app.pipeline import render_from
+
+    h, w = 512, 512
+    rng = np.random.default_rng(7)
+    bg_tex = rng.integers(60, 200, size=(h, w, 3)).astype(np.uint8)   # textured background plate
+    sub_tex = rng.integers(60, 200, size=(h, w, 3)).astype(np.uint8)  # textured subject
+    yy, xx = np.mgrid[0:h, 0:w]
+    blob = ((xx - w // 2) ** 2 + (yy - h // 2) ** 2) < (min(h, w) // 4) ** 2
+    img = bg_tex.copy()
+    img[blob] = sub_tex[blob]
+
+    alpha = blob.astype(np.float32)
+    depth = np.where(blob, 0.8, 0.3).astype(np.float32)  # subject at 0.8, background at 0.3
+    fg = img.astype(np.float32) / 255.0
+
+    def render(params):
+        return render_from(img, alpha, fg, bg_tex, depth, params)
+
+    on = render(RenderParams(k=85, autofocus=True, highlight_boost=0.0))                    # focus: subject
+    off = render(RenderParams(k=85, autofocus=False, disp_focus=0.3, highlight_boost=0.0))  # focus: background
+
+    def sharpness(rgb, mask):
+        lap = cv2.Laplacian(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32), cv2.CV_32F)
+        return float((lap * lap)[mask].mean())
+
+    er = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61))  # interiors, away from the edge band
+    core = cv2.erode(blob.astype(np.uint8), er).astype(bool)
+    bg_core = cv2.erode((~blob).astype(np.uint8), er).astype(bool)
+
+    src_sub = sharpness(img, core)
+    src_bg = sharpness(img, bg_core)
+    assert sharpness(on, core) > 0.5 * src_sub        # focused subject keeps its detail
+    assert sharpness(on, bg_core) < 0.15 * src_bg     # background behind it defocuses
+    assert sharpness(off, core) < 0.15 * src_sub      # subject off the plane genuinely defocuses
+    assert sharpness(off, bg_core) > 0.5 * src_bg     # the background ON the plane is sharp
+
+
 def test_max_blur_recalibrated_to_quarter():
     """UI K=100 now reaches a CoC ceiling of 2.75% of the diagonal — a quarter of the old 11%."""
     from app.pipeline.blur import BlurParams, focal_radius
