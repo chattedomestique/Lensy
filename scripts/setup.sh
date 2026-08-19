@@ -53,6 +53,13 @@ else
       && pip install -q omegaconf imageio addict >/dev/null 2>&1 \
       && ok "Depth Anything V3 installed (--no-deps)" \
       || warn "DA3 not installed — fine unless you set LENSY_DEPTH_MODEL=da3mono"
+    # LaMa (inpaint). simple-lama-inpainting 0.1.2 declares pillow<10.0.0 — a stale pin that
+    # conflicts with our pillow>=10.2 and, when listed as a normal dep, made the ENTIRE models
+    # extra unresolvable (so pip installed nothing at all). It runs fine on pillow 10/11 and needs
+    # only torch/torchvision/numpy/opencv, all installed above — so: --no-deps.
+    pip install -q --no-deps simple-lama-inpainting >/dev/null 2>&1 \
+      && ok "LaMa installed (--no-deps)" \
+      || warn "LaMa not installed — inpaint falls back to cv2.inpaint"
     # Default depth model is Apple Depth Pro (~1.9GB) — pre-cached here so first import is smooth.
     say "Pre-caching weights (BiRefNet, Depth Pro + V2, LaMa, SAM2) — may take a while, never fatal"
     python "$ROOT/scripts/fetch_weights.py" || warn "some weights not cached; fallbacks will be used until they are"

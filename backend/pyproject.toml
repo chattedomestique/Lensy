@@ -29,7 +29,12 @@ models = [
     "kornia>=0.7",                # BiRefNet remote code dep
     "huggingface-hub>=0.23",
     "scipy>=1.12",
-    "simple-lama-inpainting>=0.1.2",  # LaMa big-lama inpaint
+    # NOTE: simple-lama-inpainting (LaMa) is deliberately NOT here. Its 0.1.2 metadata pins
+    # pillow<10.0.0, which is irreconcilable with our pillow>=10.2 — listing it made the whole
+    # `models` extra unresolvable, so pip installed NONE of these (silently, since setup.sh treats
+    # model deps as best-effort). The pin is stale; LaMa runs fine on pillow 10/11 and its real
+    # runtime deps (torch/torchvision/numpy/opencv) are already here. setup.sh installs it
+    # --no-deps, the same way it handles depth-anything-3's xformers pin.
     # Depth Anything V3 runtime deps (the `depth-anything-3` package itself is installed --no-deps
     # by setup.sh to skip its xformers/3D extras; these are the small bits single-image depth needs)
     "omegaconf>=2.3",
