@@ -53,10 +53,12 @@ trap cleanup INT TERM EXIT
 
 # --- backend (production: no --reload), supervised so an MPS abort self-heals ---
 # All four models run hot on a 16GB Mac; a transient Metal/OOM abort would otherwise leave the
-# tunnel returning 502 until a manual restart. Respawn on any non-clean exit instead.
+# tunnel returning 502 until a manual restart. Respawn a crash — but NOT a failure to start.
 echo "${BOLD}▸ backend${OFF}  http://localhost:${PORT}"
 (
+  fails=0
   while [ "$STOPPING" = "0" ]; do
+    started=$SECONDS
     set +e  # errexit would kill this supervisor the instant uvicorn exits non-zero (a crash)
     ( cd "$ROOT/backend" && source .venv/bin/activate \
         && exec uvicorn app.main:app --host 127.0.0.1 --port "$PORT" )
@@ -64,6 +66,22 @@ echo "${BOLD}▸ backend${OFF}  http://localhost:${PORT}"
     set -e
     # 130 (SIGINT) / 143 (SIGTERM) mean we're shutting down — don't respawn
     { [ "$ec" = "130" ] || [ "$ec" = "143" ] || [ "$STOPPING" = "1" ]; } && break
+    # A crash AFTER the server was serving (MPS abort, OOM) is what this supervisor exists for.
+    # An exit within seconds means it never started — the port is taken by another Lensy, or an
+    # import failed. Respawning that spins forever at 2s intervals and buries the real error under
+    # a wall of model-loading logs (it did). Bail after 3 consecutive fast failures.
+    if [ $((SECONDS - started)) -lt 20 ]; then
+      fails=$((fails + 1))
+      if [ "$fails" -ge 3 ]; then
+        echo
+        echo "${BOLD}! backend failed to start 3× in a row (exit ${ec}) — giving up.${OFF}"
+        echo "  Usually: another Lensy already owns :${PORT}. Stop every copy, then retry:"
+        echo "    pkill -f 'scripts/serve.sh'; pkill -f 'uvicorn app.main:app'"
+        break
+      fi
+    else
+      fails=0
+    fi
     echo "${BOLD}! backend exited (code ${ec}) — restarting in 2s…${OFF}"
     sleep 2
   done
