@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sunhouse.lensy</string>
+
+    <!-- Installed by scripts/lensyctl.sh — edit the template, not the copy in LaunchAgents.
+         Runs the INSTALLED copy of lensyd.sh (__BIN__), never the one in the git checkout:
+         a reset or branch switch that deletes the file must not be able to take Lensy down. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__BIN__/lensyd.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <!-- Respawn any non-zero exit; a clean exit 0 is an intentional stop. launchd can't
+             exempt particular exit codes, so lensyd.sh backs off by itself on a setup fault
+             (then exits 78) rather than being respawned into it every 30 s. -->
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Interactive: the render pipeline wants MPS/GPU and full scheduling priority.
+         Background would deprioritize it and make renders crawl. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/lensy/lensy.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/lensy/lensy.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- npm/node for the one-time front-end build; homebrew first, like the other agents. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- The checkout the service runs: code, .venv, model weights, frontend/dist. -->
+        <key>LENSY_ROOT</key>
+        <string>__ROOT__</string>
+        <key>LENSY_PORT</key>
+        <string>__PORT__</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- Load weights from the local cache only. launchd can start this agent before the
+             network settles after a reboot; a failed HF call does not raise, it silently
+             degrades the model to a classic fallback (GrabCut/radial) and Lensy comes up
+             "healthy" rendering at the wrong quality. Offline makes startup deterministic.
+             After adding a NEW model, run ./scripts/setup.sh to cache it, then restart. -->
+        <key>HF_HUB_OFFLINE</key>
+        <string>1</string>
+        <key>TRANSFORMERS_OFFLINE</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

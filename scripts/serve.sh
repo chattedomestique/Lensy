@@ -44,8 +44,9 @@ cleanup() {
   echo; echo "${BOLD}Stopping Lensy…${OFF}"
   STOPPING=1
   for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done
-  # the auto-restart loop runs uvicorn as a grandchild — free the port so it can't be orphaned
-  lsof -ti tcp:"$PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  # the auto-restart loop runs uvicorn as a grandchild — free the port so it can't be orphaned.
+  # LISTEN only: a bare `-i tcp:PORT` also matches cloudflared's connections *to* the port.
+  lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
   rm -f "$TUNLOG"; wait 2>/dev/null || true
 }
 STOPPING=0

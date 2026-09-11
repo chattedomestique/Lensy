@@ -65,10 +65,71 @@ the built PWA *and* the render API from the same origin (no CORS, no separate fr
 > (**https://chattedomestique.github.io/Lensy/**) by the deploy workflow; it points back at
 > `lensy.sunhouse.media` for rendering. The single-origin URL above is the primary one.
 
-**Server (your Mac), port `8842`:**
+**Server (your Mac), port `8842`.** Install it once as a launchd service — then it starts at
+login, restarts itself if it crashes, and gets health-checked every two minutes:
+
 ```bash
-./scripts/serve.sh            # runs the render backend on :8842 (production)
+./scripts/lensyctl.sh install
 ```
+
+```bash
+./scripts/lensyctl.sh status     # end-to-end: agent, port, models, tunnel, public URL
+./scripts/lensyctl.sh restart    # bounce the backend
+./scripts/lensyctl.sh logs -f    # follow the backend log
+./scripts/lensyctl.sh uninstall  # remove both agents
+```
+
+`./scripts/serve.sh` still exists for a foreground run in a terminal — but a terminal is not a
+supervisor. Anything you want to still be up tomorrow goes through `lensyctl install`.
+
+<details><summary>What "hardened" actually means here</summary>
+
+Two launchd agents, installed from templates in `scripts/launchd/`. launchd runs **installed
+copies** of the two scripts (`/opt/homebrew/lib/lensy`, override with `LENSY_PREFIX`), never the
+files in this checkout — re-run `lensyctl install` after pulling changes to them; `status` flags
+a stale copy.
+
+| | |
+|---|---|
+| `com.sunhouse.lensy` | Runs `lensyd.sh`, which execs uvicorn on the checkout (`LENSY_ROOT`). `RunAtLoad` + `KeepAlive` — back after reboots and crashes. Logs to `~/Library/Logs/lensy/lensy.log`. |
+| `com.sunhouse.lensy-watchdog` | Runs `lensy-watchdog.sh` every 120 s. Probes `/healthz` and `launchctl kickstart`s the backend when it stops answering. |
+
+The failure modes each piece exists to close:
+
+- **Reboot / power cut.** The original setup only ran in a terminal, so a reboot took Lensy down
+  until someone noticed a 502. `RunAtLoad` fixes that. LaunchAgents live inside the login session,
+  so an unattended reboot only comes back if the Mac **logs in automatically** (FileVault prevents
+  that) — and after a power cut, only with *Start up automatically after a power failure* on.
+- **The checkout changing underneath it.** The first version ran its scripts straight out of this
+  repo. A `git reset --hard` deleted them and launchd crash-looped ~2,700 times — about a day
+  down — before anyone noticed. Hence the installed copies: resets, branch switches and pulls in
+  the checkout can't take the supervisor with them.
+- **Crash.** `KeepAlive` respawns any non-zero exit; a clean `lensyctl stop` stays stopped (and
+  pauses the watchdog, which would otherwise "rescue" it). launchd can't exempt particular exit
+  codes, so on a *setup* fault — no venv, the port owned by another service — `lensyd.sh` records
+  why, waits five minutes, then exits 78: a slow retry that heals itself once the cause clears,
+  not a model reload every 30 s burying the one line that matters. The watchdog stands down while
+  a fault is recorded.
+- **Wedged but alive.** A stalled MPS worker still holds the port, so `KeepAlive` sees a healthy
+  process while the tunnel serves 502s. Only an actual `/healthz` probe catches this — that's the
+  watchdog. It tolerates 2 ticks of silence and a *20-minute* warm-up before acting, so a cold
+  model load is never interrupted halfway.
+- **Silently degraded.** `load_bundle()` never raises: a model that fails to load just becomes
+  `fallback(grabcut)` and Lensy answers **200** while rendering at a quality that fails the §7
+  edge bar. The watchdog reads the model list and warns (once) when anything has fallen back,
+  and `lensyctl status` prints it per-model.
+- **Boot-time network dependency.** launchd can start the agent before the network settles, and
+  every model load was hitting `huggingface.co` first — the exact conditions for that silent
+  degradation. The agent sets `HF_HUB_OFFLINE=1`, so weights load from the local cache only:
+  deterministic startup with no network round-trips. **After adding a new model, run
+  `./scripts/setup.sh` to cache it, then `lensyctl restart`.**
+- **Stale port.** A `SIGKILL`ed instance can leave `:8842` bound; `lensyd.sh` reclaims it — only
+  from its own uvicorn, and only the *listening* socket: a bare `lsof -i :8842` also matches the
+  client end of every connection to the port, which is cloudflared, and killing that drops every
+  tunnel on the Mac.
+- **Unbounded logs.** launchd doesn't rotate. The watchdog copy-truncates at 20 MB.
+
+</details>
 
 **Tunnel (named, you manage cloudflared like your other tunnels).** Route
 `lensy.sunhouse.media → http://localhost:8842`:
