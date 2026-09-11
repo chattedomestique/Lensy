@@ -18,9 +18,9 @@ LOGDIR="$HOME/Library/Logs/lensy"
 FAULT="$LOGDIR/config-fault"
 mkdir -p "$LOGDIR"
 
-# SIGTERM is always an intentional stop (lensyctl stop, bootout). Exit 0 so KeepAlive leaves it
-# down — including mid-backoff below, where bash would otherwise die with 143 and be respawned.
-# (After the exec, uvicorn installs its own handler and exits 0 on SIGTERM too.)
+# SIGTERM is always an intentional stop (lensyctl stop, bootout, kickstart -k). Exit 0 so KeepAlive
+# leaves it down — including mid-backoff below, where bash would otherwise die with 143 and be
+# respawned. Once uvicorn is running, the forwarding trap at the bottom takes over.
 trap 'exit 0' TERM
 
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -68,4 +68,25 @@ if [ ! -f "$ROOT/frontend/dist/index.html" ]; then
 fi
 
 cd "$ROOT/backend"
-exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port "$PORT" --timeout-graceful-shutdown 20
+
+# uvicorn runs as a child, not via `exec`. It re-raises SIGTERM after its graceful shutdown
+# (capture_signals, 0.29+), so on its own it dies *by signal* — which launchd counts as a failure
+# and respawns: a `lensyctl stop` came back 31 s later (measured: exit 143). So stay the parent,
+# forward the stop, and exit 0 for it. Any exit nobody asked for — crash, OOM kill, exception —
+# passes through as a failure so KeepAlive restarts it. Still no restart loop here: launchd
+# remains the one supervisor.
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port "$PORT" --timeout-graceful-shutdown 20 &
+child=$!
+stop_requested=0
+trap 'stop_requested=1; kill -TERM "$child" 2>/dev/null || true' TERM INT
+ec=0
+while :; do
+  wait "$child" && ec=0 || ec=$?
+  kill -0 "$child" 2>/dev/null || break  # a trapped signal cuts `wait` short — wait again
+done
+if [ "$stop_requested" = 1 ]; then
+  echo "── lensyd stop $(stamp)  (requested)"
+  exit 0
+fi
+echo "!! uvicorn exited unexpectedly (status ${ec}) — launchd will restart it"
+exit $(( ec == 0 ? 1 : ec ))

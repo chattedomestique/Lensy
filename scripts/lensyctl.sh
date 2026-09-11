@@ -33,6 +33,7 @@ bad()  { echo "  ${RED}●${OFF} $*"; }
 warn() { echo "  ${ORANGE}●${OFF} $*"; }
 
 loaded() { launchctl print "gui/${UID_N}/$1" >/dev/null 2>&1; }
+agent_pid() { launchctl print "gui/${UID_N}/${LABEL}" 2>/dev/null | awk -F'= *' '/^\tpid =/{print $2; exit}'; }
 
 install_shims() {
   mkdir -p "$PREFIX"
@@ -95,8 +96,28 @@ cmd_uninstall() {
 
 # The watchdog treats a missing backend as a wedge and kickstarts it — so an intentional stop has
 # to tell it to stand down, or `stop` would quietly undo itself four minutes later.
-cmd_start()   { rm -f "$LOGDIR/stopped"; launchctl kickstart "gui/${UID_N}/${LABEL}" && echo "  started"; }
-cmd_stop()    { mkdir -p "$LOGDIR"; : >"$LOGDIR/stopped"; launchctl kill SIGTERM "gui/${UID_N}/${LABEL}" 2>/dev/null || true; echo "  stopped — stays down (watchdog paused) until: lensyctl start"; }
+#
+# Both wait for the process to actually be gone. SIGTERM only *starts* uvicorn's graceful shutdown
+# (up to 20 s); a `start` landing inside it is a no-op on a still-running job, which then exits 0
+# and — correctly, as far as launchd knows — stays down. (Found by testing stop → start live.)
+cmd_stop() {
+  mkdir -p "$LOGDIR"; : >"$LOGDIR/stopped"
+  launchctl kill SIGTERM "gui/${UID_N}/${LABEL}" 2>/dev/null || true
+  for _ in $(seq 1 60); do [ -z "$(agent_pid)" ] && break; sleep 0.5; done
+  if [ -n "$(agent_pid)" ]; then echo "  !! still shutting down after 30 s (pid $(agent_pid))"; return 1; fi
+  echo "  stopped — stays down (watchdog paused) until: lensyctl start"
+}
+cmd_start() {
+  local was_stopped=0; [ -f "$LOGDIR/stopped" ] && was_stopped=1
+  rm -f "$LOGDIR/stopped"
+  # A stop may still be finishing (another terminal); let it land, then start fresh.
+  if [ "$was_stopped" = 1 ]; then
+    for _ in $(seq 1 60); do [ -z "$(agent_pid)" ] && break; sleep 0.5; done
+  fi
+  local pid; pid="$(agent_pid)"
+  if [ -n "$pid" ]; then echo "  already running (pid ${pid})"; return 0; fi
+  launchctl kickstart "gui/${UID_N}/${LABEL}" && echo "  started"
+}
 cmd_restart() { rm -f "$LOGDIR/stopped"; launchctl kickstart -k "gui/${UID_N}/${LABEL}" && echo "  restarting…"; }
 
 cmd_logs() {
@@ -108,7 +129,7 @@ cmd_status() {
   echo "${BOLD}Lensy${OFF} ${DIM}— ${ROOT}${OFF}"
 
   if loaded "$LABEL"; then
-    local pid; pid="$(launchctl print "gui/${UID_N}/${LABEL}" 2>/dev/null | awk -F'= *' '/^\tpid =/{print $2; exit}')"
+    local pid; pid="$(agent_pid)"
     if [ -n "${pid:-}" ]; then ok "agent ${LABEL} running (pid ${pid})"
     elif [ -f "$LOGDIR/stopped" ]; then warn "agent ${LABEL} stopped on purpose — lensyctl start"
     else bad "agent ${LABEL} loaded but not running"; fi

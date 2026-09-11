@@ -29,6 +29,9 @@
     </dict>
     <key>ThrottleInterval</key>
     <integer>30</integer>
+    <!-- uvicorn's graceful shutdown may take its full 20 s; launchd's default would SIGKILL first. -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
 
     <!-- Interactive: the render pipeline wants MPS/GPU and full scheduling priority.
          Background would deprioritize it and make renders crawl. -->

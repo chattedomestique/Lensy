@@ -91,7 +91,7 @@ a stale copy.
 
 | | |
 |---|---|
-| `com.sunhouse.lensy` | Runs `lensyd.sh`, which execs uvicorn on the checkout (`LENSY_ROOT`). `RunAtLoad` + `KeepAlive` — back after reboots and crashes. Logs to `~/Library/Logs/lensy/lensy.log`. |
+| `com.sunhouse.lensy` | Runs `lensyd.sh`, which runs uvicorn on the checkout (`LENSY_ROOT`). `RunAtLoad` + `KeepAlive` — back after reboots and crashes. Logs to `~/Library/Logs/lensy/lensy.log`. |
 | `com.sunhouse.lensy-watchdog` | Runs `lensy-watchdog.sh` every 120 s. Probes `/healthz` and `launchctl kickstart`s the backend when it stops answering. |
 
 The failure modes each piece exists to close:
@@ -104,12 +104,15 @@ The failure modes each piece exists to close:
   repo. A `git reset --hard` deleted them and launchd crash-looped ~2,700 times — about a day
   down — before anyone noticed. Hence the installed copies: resets, branch switches and pulls in
   the checkout can't take the supervisor with them.
-- **Crash.** `KeepAlive` respawns any non-zero exit; a clean `lensyctl stop` stays stopped (and
-  pauses the watchdog, which would otherwise "rescue" it). launchd can't exempt particular exit
-  codes, so on a *setup* fault — no venv, the port owned by another service — `lensyd.sh` records
-  why, waits five minutes, then exits 78: a slow retry that heals itself once the cause clears,
-  not a model reload every 30 s burying the one line that matters. The watchdog stands down while
-  a fault is recorded.
+- **Crash.** `KeepAlive` respawns any non-zero exit — including death by signal, which is why
+  `lensyd.sh` stays uvicorn's parent instead of `exec`ing it: uvicorn re-raises SIGTERM after its
+  graceful shutdown, so on its own every stop looked like a crash and came back 30 s later.
+  `lensyd.sh` forwards the stop and exits 0, so `lensyctl stop` stays stopped (it also pauses the
+  watchdog, which would otherwise "rescue" it). launchd can't exempt particular exit codes, so on
+  a *setup* fault — no venv, the port owned by another service — `lensyd.sh` records why, waits
+  five minutes, then exits 78: a slow retry that heals itself once the cause clears, not a model
+  reload every 30 s burying the one line that matters. The watchdog stands down while a fault is
+  recorded.
 - **Wedged but alive.** A stalled MPS worker still holds the port, so `KeepAlive` sees a healthy
   process while the tunnel serves 502s. Only an actual `/healthz` probe catches this — that's the
   watchdog. It tolerates 2 ticks of silence and a *20-minute* warm-up before acting, so a cold
